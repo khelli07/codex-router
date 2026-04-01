@@ -10,8 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/cli/index.ts",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run --dir tests",
+    "test:watch": "vitest --dir tests"
   },
   "keywords": [],
   "author": "",

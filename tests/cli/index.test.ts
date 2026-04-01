@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 
-import { runCli, type CliDependencies } from "../../src/cli/index.js";
+import { isDirectCliEntry, runCli, type CliDependencies } from "../../src/cli/index.js";
 import type { WrapperInstallResult, WrapperLauncher } from "../../src/core/wrapper.js";
 
 type TestCliDependencies = CliDependencies & { __writes: string[] };
@@ -85,6 +85,22 @@ function makeDependencies(overrides: Partial<CliDependencies> = {}): TestCliDepe
 }
 
 describe("CLI", () => {
+  test("treats a symlinked bin path as a direct CLI entry", () => {
+    expect(
+      isDirectCliEntry(
+        "/tmp/node_modules/.bin/codex-router",
+        "file:///tmp/project/dist/src/cli/index.js",
+        (value: string) => {
+          if (value === "/tmp/node_modules/.bin/codex-router") {
+            return "/tmp/project/dist/src/cli/index.js";
+          }
+
+          return value;
+        },
+      ),
+    ).toBe(true);
+  });
+
   test("prints the active tag for current", async () => {
     const deps = makeDependencies();
 
@@ -128,6 +144,7 @@ describe("CLI", () => {
     const output = deps.__writes.join("");
     expect(output).toContain("Installed codex wrapper");
     expect(output).toContain("Real codex binary");
+    expect(output).toContain("Activate in this shell");
     expect(output).toMatch(/(Updated|Verified) shell profile|Add to your shell profile/);
   });
 });

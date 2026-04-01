@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { Command, CommanderError } from "commander";
+import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { updateShellProfile } from "./shell-profile.js";
 import { createRouterService, type RouterService } from "../core/service.js";
@@ -27,6 +28,22 @@ export interface CliDependencies {
   routerHome: string;
   writeStdout: (value: string) => void;
   writeStderr: (value: string) => void;
+}
+
+export function isDirectCliEntry(
+  argvEntry: string | undefined,
+  moduleUrl: string,
+  resolvePath: (value: string) => string = realpathSync,
+): boolean {
+  if (!argvEntry) {
+    return false;
+  }
+
+  try {
+    return resolvePath(argvEntry) === resolvePath(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
 }
 
 function defaultLauncher(): WrapperLauncher {
@@ -157,6 +174,7 @@ export async function runCli(
     const result = await service.initWrapper(dependencies.detectLauncher());
     dependencies.writeStdout(`Installed codex wrapper at ${result.wrapperPath}\n`);
     dependencies.writeStdout(`Real codex binary: ${result.realCodexPath}\n`);
+    dependencies.writeStdout(`Activate in this shell: ${result.pathHint} && hash -r\n`);
     const shellProfile = await dependencies.updateShellProfile(path.dirname(result.wrapperPath));
 
     if (shellProfile.profilePath) {
@@ -231,7 +249,7 @@ export async function runCli(
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isDirectCliEntry(process.argv[1], import.meta.url)) {
   const exitCode = await runCli(process.argv.slice(2));
   process.exit(exitCode);
 }
