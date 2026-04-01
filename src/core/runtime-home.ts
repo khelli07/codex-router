@@ -4,6 +4,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -44,6 +45,88 @@ async function pathExists(targetPath: string): Promise<boolean> {
     }
 
     throw error;
+  }
+}
+
+async function resolveExistingPath(targetPath: string): Promise<string | undefined> {
+  try {
+    return await realpath(targetPath);
+  } catch (error) {
+    const asNodeError = error as NodeJS.ErrnoException;
+    if (asNodeError.code === "ENOENT") {
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
+async function materializeSharedSymlinks(layout: RouterLayout): Promise<void> {
+  if (!(await pathExists(layout.sharedDir))) {
+    return;
+  }
+
+  for (const name of await readdir(layout.sharedDir)) {
+    const target = path.join(layout.sharedDir, name);
+    const targetStat = await lstat(target);
+    if (!targetStat.isSymbolicLink()) {
+      continue;
+    }
+
+    let resolvedTarget: string | undefined;
+    try {
+      resolvedTarget = await realpath(target);
+    } catch (error) {
+      const asNodeError = error as NodeJS.ErrnoException;
+      if (asNodeError.code === "ELOOP") {
+        await rm(target, { force: true, recursive: true });
+        continue;
+      }
+
+      throw error;
+    }
+
+    if (!resolvedTarget || resolvedTarget === target) {
+      await rm(target, { force: true, recursive: true });
+      continue;
+    }
+
+    const resolvedStat = await stat(target);
+    await rm(target, { force: true, recursive: true });
+    await cp(resolvedTarget, target, {
+      recursive: resolvedStat.isDirectory(),
+      dereference: true,
+    });
+  }
+}
+
+async function copyIntoManagedState(source: string, target: string): Promise<void> {
+  const sourceStat = await lstat(source);
+
+  let actualSource = source;
+  let actualStat = sourceStat;
+  if (sourceStat.isSymbolicLink()) {
+    actualSource = await realpath(source);
+    actualStat = await stat(source);
+  }
+
+  await rm(target, { force: true, recursive: true });
+  await cp(actualSource, target, {
+    recursive: actualStat.isDirectory(),
+    dereference: true,
+  });
+}
+
+async function assertImportSourceAllowed(sourceCodexHome: string, layout: RouterLayout): Promise<void> {
+  const resolvedSource = await resolveExistingPath(sourceCodexHome);
+  if (!resolvedSource) {
+    return;
+  }
+
+  const resolvedRuntimeHome =
+    (await resolveExistingPath(layout.runtimeCurrentHomeDir)) ?? layout.runtimeCurrentHomeDir;
+  if (resolvedSource === resolvedRuntimeHome) {
+    throw new Error("Cannot import from the router-managed runtime home. Restore or use a real Codex home instead.");
   }
 }
 
@@ -97,9 +180,14 @@ async function writeRuntimeConfig(sharedDir: string, runtimeHomeDir: string, tag
   const sharedConfig = (await pathExists(sharedConfigPath))
     ? await readFile(sharedConfigPath, "utf8")
     : "";
+  const sanitizedSharedConfig = sharedConfig
+    .split("\n")
+    .filter((line) => !line.startsWith("# Managed by codex-router for "))
+    .filter((line) => !line.trimStart().startsWith('cli_auth_credentials_store = '))
+    .join("\n");
 
   const managedConfig = [
-    sharedConfig.trimEnd(),
+    sanitizedSharedConfig.trimEnd(),
     "",
     `# Managed by codex-router for ${tag}`,
     'cli_auth_credentials_store = "file"',
@@ -125,6 +213,7 @@ async function linkSharedEntry(sharedDir: string, runtimeHomeDir: string, name: 
 export async function ensureRouterLayout(routerHome: string): Promise<RouterLayout> {
   const layout = getRouterLayout(routerHome);
   await ensureSharedContainers(layout);
+  await materializeSharedSymlinks(layout);
   return layout;
 }
 
@@ -171,13 +260,11 @@ export async function assembleRuntimeHome(
 
 export async function importSharedState(input: ImportSharedStateInput): Promise<RouterLayout> {
   const layout = await ensureRouterLayout(input.routerHome);
+  await assertImportSourceAllowed(input.sourceCodexHome, layout);
   for (const name of await listShareableEntryNames(input.sourceCodexHome)) {
     const source = path.join(input.sourceCodexHome, name);
     const target = path.join(layout.sharedDir, name);
-    const sourceStat = await stat(source);
-
-    await rm(target, { force: true, recursive: true });
-    await cp(source, target, { recursive: sourceStat.isDirectory() });
+    await copyIntoManagedState(source, target);
   }
 
   return layout;

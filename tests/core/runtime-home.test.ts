@@ -1,4 +1,5 @@
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -124,6 +125,57 @@ describe("runtime home assembly", () => {
     await expect(readFile(path.join(layout.sharedDir, "auth.json"), "utf8")).rejects.toThrow();
   });
 
+  test("dereferences imported symlinks instead of copying them as managed symlinks", async () => {
+    const routerHome = await makeRouterHome();
+    const sourceHome = path.join(routerHome, "source-codex-home");
+    const realPluginDir = path.join(routerHome, "real-plugins");
+    const layout = await ensureRouterLayout(routerHome);
+
+    await mkdir(realPluginDir, { recursive: true });
+    await mkdir(sourceHome, { recursive: true });
+    await writeFile(path.join(realPluginDir, "keep.txt"), "plugin\n", "utf8");
+    await import("node:fs/promises").then(({ symlink }) =>
+      symlink(realPluginDir, path.join(sourceHome, "plugins")),
+    );
+
+    await importSharedState({
+      sourceCodexHome: sourceHome,
+      routerHome,
+    });
+
+    await expect(readFile(path.join(layout.sharedDir, "plugins", "keep.txt"), "utf8")).resolves.toContain(
+      "plugin",
+    );
+    await expect(lstat(path.join(layout.sharedDir, "plugins"))).resolves.toMatchObject({
+      isSymbolicLink: expect.any(Function),
+    });
+    expect((await lstat(path.join(layout.sharedDir, "plugins"))).isSymbolicLink()).toBe(false);
+  });
+
+  test("rejects importing from the router-managed runtime home", async () => {
+    const routerHome = await makeRouterHome();
+    const layout = await ensureRouterLayout(routerHome);
+
+    await expect(
+      importSharedState({
+        sourceCodexHome: layout.runtimeCurrentHomeDir,
+        routerHome,
+      }),
+    ).rejects.toThrow(/router-managed runtime home/i);
+  });
+
+  test("removes self-referential shared symlinks during layout repair", async () => {
+    const routerHome = await makeRouterHome();
+    const layout = await ensureRouterLayout(routerHome);
+    const loopPath = path.join(layout.sharedDir, "history.jsonl");
+
+    await import("node:fs/promises").then(({ symlink }) => symlink(loopPath, loopPath));
+
+    await ensureRouterLayout(routerHome);
+
+    await expect(lstat(loopPath)).rejects.toThrow();
+  });
+
   test("persists runtime-created non-auth state back into shared storage on rebuild", async () => {
     const routerHome = await makeRouterHome();
     const layout = await ensureRouterLayout(routerHome);
@@ -157,5 +209,35 @@ describe("runtime home assembly", () => {
 
     const persistedModelsTarget = await realpath(path.join(layout.runtimeCurrentHomeDir, "models_cache.json"));
     expect(persistedModelsTarget).toBe(await realpath(path.join(layout.sharedDir, "models_cache.json")));
+  });
+
+  test("rewrites runtime config without duplicating managed auth settings", async () => {
+    const routerHome = await makeRouterHome();
+    const layout = await ensureRouterLayout(routerHome);
+
+    await writeFile(
+      path.join(layout.sharedDir, "config.toml"),
+      [
+        'model = "gpt-5.4"',
+        "# Managed by codex-router for codex-1",
+        'cli_auth_credentials_store = "file"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const authPath = path.join(layout.accountsDir, "codex-2", "auth.json");
+    await mkdir(path.dirname(authPath), { recursive: true });
+    await writeFile(authPath, "{\"access_token\":\"secret\"}\n", "utf8");
+
+    await assembleRuntimeHome({
+      routerHome,
+      tag: "codex-2",
+      authSourcePath: authPath,
+    });
+
+    const config = await readFile(path.join(layout.runtimeCurrentHomeDir, "config.toml"), "utf8");
+    expect(config.match(/cli_auth_credentials_store = "file"/g)?.length).toBe(1);
+    expect(config).toContain("# Managed by codex-router for codex-2");
   });
 });
