@@ -34,6 +34,11 @@ interface ImportSharedStateInput {
   routerHome: string;
 }
 
+interface RestoreCodexHomeInput {
+  sourceCodexHome: string;
+  targetCodexHome: string;
+}
+
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
     await stat(targetPath);
@@ -151,6 +156,15 @@ async function listShareableEntryNames(homeDir: string): Promise<string[]> {
     .sort();
 }
 
+function sanitizeConfigContents(contents: string): string {
+  return contents
+    .split("\n")
+    .filter((line) => !line.startsWith("# Managed by codex-router for "))
+    .filter((line) => !line.trimStart().startsWith('cli_auth_credentials_store = '))
+    .join("\n")
+    .trimEnd();
+}
+
 async function syncRuntimeStateToShared(layout: RouterLayout): Promise<void> {
   if (!(await pathExists(layout.runtimeCurrentHomeDir))) {
     return;
@@ -180,11 +194,7 @@ async function writeRuntimeConfig(sharedDir: string, runtimeHomeDir: string, tag
   const sharedConfig = (await pathExists(sharedConfigPath))
     ? await readFile(sharedConfigPath, "utf8")
     : "";
-  const sanitizedSharedConfig = sharedConfig
-    .split("\n")
-    .filter((line) => !line.startsWith("# Managed by codex-router for "))
-    .filter((line) => !line.trimStart().startsWith('cli_auth_credentials_store = '))
-    .join("\n");
+  const sanitizedSharedConfig = sanitizeConfigContents(sharedConfig);
 
   const managedConfig = [
     sanitizedSharedConfig.trimEnd(),
@@ -221,8 +231,16 @@ export async function seedSharedStateFromCodexHome(
   input: ImportSharedStateInput,
 ): Promise<RouterLayout> {
   const layout = await ensureRouterLayout(input.routerHome);
+  await assertImportSourceAllowed(input.sourceCodexHome, layout);
+
   const existingEntries = await listShareableEntryNames(layout.sharedDir);
   if (existingEntries.length > 0) {
+    const sourceConfigPath = path.join(input.sourceCodexHome, "config.toml");
+    const targetConfigPath = path.join(layout.sharedDir, "config.toml");
+    if (await pathExists(sourceConfigPath)) {
+      await copyIntoManagedState(sourceConfigPath, targetConfigPath);
+    }
+
     return layout;
   }
 
@@ -268,4 +286,21 @@ export async function importSharedState(input: ImportSharedStateInput): Promise<
   }
 
   return layout;
+}
+
+export async function restoreCodexHomeFromSource(input: RestoreCodexHomeInput): Promise<void> {
+  await mkdir(input.targetCodexHome, { recursive: true });
+
+  for (const name of await listShareableEntryNames(input.sourceCodexHome)) {
+    const source = path.join(input.sourceCodexHome, name);
+    const target = path.join(input.targetCodexHome, name);
+
+    if (name === "config.toml") {
+      const sanitizedConfig = sanitizeConfigContents(await readFile(source, "utf8"));
+      await writeFile(target, sanitizedConfig ? `${sanitizedConfig}\n` : "", "utf8");
+      continue;
+    }
+
+    await copyIntoManagedState(source, target);
+  }
 }

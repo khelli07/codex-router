@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, readFile, readlink, readdir, realpath, rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -120,65 +120,6 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
     }
   }
 
-  async function restoreLegacyDefaultCodexHome(): Promise<void> {
-    let defaultHomeStat;
-    try {
-      defaultHomeStat = await lstat(defaultCodexHome);
-    } catch (error) {
-      const asNodeError = error as NodeJS.ErrnoException;
-      if (asNodeError.code === "ENOENT") {
-        return;
-      }
-
-      throw error;
-    }
-
-    if (!defaultHomeStat.isSymbolicLink()) {
-      return;
-    }
-
-    try {
-      const symlinkTarget = await readlink(defaultCodexHome);
-      const resolvedSymlinkTarget = path.resolve(path.dirname(defaultCodexHome), symlinkTarget);
-      if (resolvedSymlinkTarget !== layout.runtimeCurrentHomeDir) {
-        return;
-      }
-    } catch {
-      try {
-        const actualTarget = await realpath(defaultCodexHome);
-        if (actualTarget !== layout.runtimeCurrentHomeDir) {
-          return;
-        }
-      } catch {
-        return;
-      }
-    }
-
-    await rm(defaultCodexHome, { force: true, recursive: true });
-
-    const backupsDir = path.join(input.routerHome, "backups");
-    let backupNames: string[] = [];
-    try {
-      backupNames = (await readdir(backupsDir))
-        .filter((name) => name.startsWith("default-codex-home-"))
-        .sort()
-        .reverse();
-    } catch (error) {
-      const asNodeError = error as NodeJS.ErrnoException;
-      if (asNodeError.code !== "ENOENT") {
-        throw error;
-      }
-    }
-
-    const latestBackup = backupNames[0] ? path.join(backupsDir, backupNames[0]) : undefined;
-    if (latestBackup) {
-      await cp(latestBackup, defaultCodexHome, { recursive: true, dereference: true });
-      return;
-    }
-
-    await mkdir(defaultCodexHome, { recursive: true });
-  }
-
   async function getCodexCommand(): Promise<string> {
     if (process.env.CODEX_ROUTER_REAL_CODEX) {
       return process.env.CODEX_ROUTER_REAL_CODEX;
@@ -225,7 +166,6 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
 
     async initWrapper(launcher: WrapperLauncher): Promise<WrapperInstallResult> {
       await ensureRouterLayout(input.routerHome);
-      await restoreLegacyDefaultCodexHome();
       const realCodexPath = await findRealCodexPath(input.routerHome, input.pathValue);
       return await installCodexWrapper(input.routerHome, realCodexPath, launcher);
     },

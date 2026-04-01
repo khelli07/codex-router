@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -129,6 +129,50 @@ describe("router service", () => {
     await expect(stat(path.join(routerHome, "shared", "auth.json"))).rejects.toThrow();
   });
 
+  test("refreshes shared config from the default codex home on tagged login when shared state already exists", async () => {
+    const fakeHome = await prepareFakeCodexHome();
+    const routerHome = await makeTempDir();
+    const defaultCodexHome = path.join(fakeHome, ".codex");
+
+    await mkdir(path.join(routerHome, "shared"), { recursive: true });
+    await writeFile(path.join(routerHome, "shared", "config.toml"), 'model = "gpt-5.4"\n', "utf8");
+    await writeFile(path.join(routerHome, "shared", "history.jsonl"), "[]\n", "utf8");
+    await writeFile(path.join(defaultCodexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+
+    const service = createRouterService({
+      routerHome,
+      workspaceCwd: "/tmp/project",
+      appServerRequester: async ({ method }) => {
+        if (method === "account/read") {
+          return {
+            account: {
+              type: "chatgpt",
+              email: "codex-1@example.com",
+              planType: "plus",
+            },
+            requiresOpenaiAuth: true,
+          };
+        }
+
+        throw new Error(`Unexpected method: ${method}`);
+      },
+      runner: async (_command, args, options) => {
+        if (args[0] === "login") {
+          await writeFile(path.join(options.env.CODEX_HOME!, "auth.json"), "{\"token\":true}\n", "utf8");
+        }
+
+        return { exitCode: 0, stderr: "", stdout: "" };
+      },
+    });
+
+    await service.login("codex-1");
+
+    await expect(readFile(path.join(routerHome, "shared", "config.toml"), "utf8")).resolves.toContain(
+      'model = "gpt-5.5"',
+    );
+    await expect(readFile(path.join(routerHome, "shared", "history.jsonl"), "utf8")).resolves.toContain("[]");
+  });
+
   test("refreshes a tag status and stores live 5-hour and weekly percentages", async () => {
     await prepareFakeCodexHome();
     const routerHome = await makeTempDir();
@@ -248,40 +292,6 @@ describe("router service", () => {
     await expect(readFile(path.join(routerHome, "state", "wrapper.json"), "utf8")).resolves.toContain(realCodexPath);
   });
 
-  test("init restores a legacy default codex symlink from backup before installing the wrapper", async () => {
-    const fakeHome = await prepareFakeCodexHome();
-    const routerHome = await makeTempDir();
-    const defaultCodexHome = path.join(fakeHome, ".codex");
-    const runtimeHome = path.join(routerHome, "runtime", "current-home");
-    const backupHome = path.join(routerHome, "backups", "default-codex-home-123");
-    const binDir = await makeTempDir();
-    const realCodexPath = path.join(binDir, "codex");
-
-    await mkdir(path.dirname(runtimeHome), { recursive: true });
-    await mkdir(path.dirname(backupHome), { recursive: true });
-    await mkdir(backupHome, { recursive: true });
-    await writeFile(path.join(backupHome, "config.toml"), "model = \"gpt-5.4\"\n", "utf8");
-    await writeFile(realCodexPath, "#!/bin/sh\nexit 0\n", "utf8");
-    await chmod(realCodexPath, 0o755);
-
-    await rm(defaultCodexHome, { force: true, recursive: true });
-    await symlink(runtimeHome, defaultCodexHome);
-
-    const service = createRouterService({
-      routerHome,
-      workspaceCwd: "/tmp/project",
-      pathValue: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    });
-
-    await service.initWrapper({
-      kind: "command",
-      command: "codex-router",
-    });
-
-    expect((await lstat(defaultCodexHome)).isSymbolicLink()).toBe(false);
-    await expect(readFile(path.join(defaultCodexHome, "config.toml"), "utf8")).resolves.toContain("gpt-5.4");
-  });
-
   test("runs the selected account through the managed runtime", async () => {
     await prepareFakeCodexHome();
     const routerHome = await makeTempDir();
@@ -321,7 +331,7 @@ describe("router service", () => {
     const exitCode = await service.runSelectedCodex(["--version"]);
 
     expect(exitCode).toBe(0);
-    expect(invocations.at(-1)?.command).toBe("codex");
+    expect(path.basename(invocations.at(-1)?.command ?? "")).toBe("codex");
     expect(invocations.at(-1)?.args).toEqual(["--version"]);
     expect(invocations.at(-1)?.codexHome).toBe(path.join(routerHome, "runtime", "current-home"));
   });

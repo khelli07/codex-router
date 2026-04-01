@@ -51,6 +51,30 @@ codex-router import
 
 By default this imports from `~/.codex` into `~/.codex-router/shared`.
 
+## Example: 2 accounts, 1 shared context
+
+You can switch which account pays for usage without losing the local conversation context managed by the router:
+
+```bash
+# Start with account 1.
+codex-router switch codex-1
+codex
+
+# Example conversation:
+# User: I want to tell you a secret.
+# User: Today is Wednesday.
+
+# Switch to account 2, then reopen the same session.
+codex-router switch codex-2
+codex resume <session-id>
+
+# Continue from the same shared context:
+# User: what was the secret I told u?
+# Assistant: You didn't actually tell me a secret. You said: "Today is Wednesday."
+```
+
+The active account changes the auth and quota slot, but the shared router context still carries the session history, prompts, MCP setup, and other non-auth state.
+
 ## Managed layout
 
 `codex-router` keeps its own state under `~/.codex-router`:
@@ -61,6 +85,10 @@ By default this imports from `~/.codex` into `~/.codex-router/shared`.
 - `bin/codex` - optional wrapper installed by `codex-router init`
 - `state/accounts.json` - tag registry and last observed status snapshots
 - `state/wrapper.json` - stored path to the real Codex binary
+
+## `~/.codex` is never written to
+
+`codex-router` never creates, modifies, or deletes `~/.codex`. All router state lives under `~/.codex-router`. It may read from `~/.codex` during `codex-router import`, the first auto-seed on tagged login, and later shared `config.toml` refreshes, but it does not write back to `~/.codex`.
 
 ## Notes
 

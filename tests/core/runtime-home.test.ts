@@ -17,6 +17,7 @@ import {
   assembleRuntimeHome,
   ensureRouterLayout,
   importSharedState,
+  seedSharedStateFromCodexHome,
 } from "../../src/core/runtime-home.js";
 
 const tempDirs: string[] = [];
@@ -239,5 +240,26 @@ describe("runtime home assembly", () => {
     const config = await readFile(path.join(layout.runtimeCurrentHomeDir, "config.toml"), "utf8");
     expect(config.match(/cli_auth_credentials_store = "file"/g)?.length).toBe(1);
     expect(config).toContain("# Managed by codex-router for codex-2");
+  });
+
+  test("refreshes shared config from the source codex home even after shared state exists", async () => {
+    const routerHome = await makeRouterHome();
+    const sourceHome = path.join(routerHome, "source-codex-home");
+    const layout = await ensureRouterLayout(routerHome);
+
+    await mkdir(sourceHome, { recursive: true });
+    await writeFile(path.join(sourceHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+    await writeFile(path.join(layout.sharedDir, "config.toml"), 'model = "gpt-5.4"\n', "utf8");
+    await writeFile(path.join(layout.sharedDir, "history.jsonl"), "[]\n", "utf8");
+
+    await seedSharedStateFromCodexHome({
+      sourceCodexHome: sourceHome,
+      routerHome,
+    });
+
+    await expect(readFile(path.join(layout.sharedDir, "config.toml"), "utf8")).resolves.toContain(
+      'model = "gpt-5.5"',
+    );
+    await expect(readFile(path.join(layout.sharedDir, "history.jsonl"), "utf8")).resolves.toContain("[]");
   });
 });
