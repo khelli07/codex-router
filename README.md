@@ -41,16 +41,6 @@ codex-router status -t codex-1
 codex-router del -t codex-1
 ```
 
-## Shared state import
-
-To copy your current local Codex context into the shared router-managed area:
-
-```bash
-codex-router import
-```
-
-By default this imports from `~/.codex` into `~/.codex-router/shared`.
-
 ## Example: 2 accounts, 1 shared context
 
 You can switch which account pays for usage without losing the local conversation context managed by the router:
@@ -88,7 +78,7 @@ The active account changes the auth and quota slot, but the shared router contex
 
 ## `~/.codex` is never written to
 
-`codex-router` never creates, modifies, or deletes `~/.codex`. All router state lives under `~/.codex-router`. It may read from `~/.codex` during `codex-router import`, the first auto-seed on tagged login, and later shared `config.toml` refreshes, but it does not write back to `~/.codex`.
+`codex-router` never creates, modifies, or deletes `~/.codex`. All router state lives under `~/.codex-router`. It may read from `~/.codex` during the first auto-seed on tagged login and later shared `config.toml` refreshes, but it does not write back to `~/.codex`.
 
 ## Notes
 

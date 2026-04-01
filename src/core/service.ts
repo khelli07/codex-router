@@ -26,7 +26,6 @@ import { getRouterLayout } from "./paths.js";
 import {
   assembleRuntimeHome,
   ensureRouterLayout,
-  importSharedState,
   seedSharedStateFromCodexHome,
 } from "./runtime-home.js";
 import type { RateLimitSnapshot } from "./status.js";
@@ -64,7 +63,6 @@ export interface RouterService {
   switchTo(tag: string): Promise<AccountRecord>;
   current(): Promise<AccountRecord | undefined>;
   deleteTag(tag: string): Promise<void>;
-  importDefaultCodexHome(sourceCodexHome?: string): Promise<void>;
   statusAll(): Promise<AccountStatusResult[]>;
   statusForTag(tag: string): Promise<AccountStatusResult>;
 }
@@ -213,13 +211,6 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
       const accountHomeDir = getAccountHomeDir(layout.accountsDir, tag);
       await removeAccount(layout.registryPath, tag);
       await rm(accountHomeDir, { force: true, recursive: true });
-    },
-
-    async importDefaultCodexHome(sourceCodexHome = path.join(os.homedir(), ".codex")): Promise<void> {
-      await importSharedState({
-        sourceCodexHome,
-        routerHome: input.routerHome,
-      });
     },
 
     async statusAll(): Promise<AccountStatusResult[]> {

@@ -227,14 +227,6 @@ export async function runCli(
       dependencies.writeStdout(`Deleted ${options.tag}\n`);
     });
 
-  program
-    .command("import")
-    .option("-s, --source <path>", "Path to an existing CODEX_HOME")
-    .action(async (options: { source?: string }) => {
-      await service.importDefaultCodexHome(options.source);
-      dependencies.writeStdout("Imported shared Codex state\n");
-    });
-
   try {
     await program.parseAsync(argv, { from: "user" });
     return 0;

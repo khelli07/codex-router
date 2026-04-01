@@ -40,7 +40,6 @@ function makeDependencies(overrides: Partial<CliDependencies> = {}): TestCliDepe
         createdAt: new Date().toISOString(),
       })),
       deleteTag: vi.fn(async () => {}),
-      importDefaultCodexHome: vi.fn(async () => {}),
       statusAll: vi.fn(async () => [
         {
           tag: "codex-1",
