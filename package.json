@@ -10,7 +10,6 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/cli/index.ts",
-    "gui": "tsx src/gui/app.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },

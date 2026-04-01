@@ -2,7 +2,6 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 
-import { hasResumeCandidate } from "./resume.js";
 import { parseRateLimitsFromJsonLines, parseRateLimitsFromText, type RateLimitSnapshot } from "./status.js";
 
 export interface CommandResult {
@@ -31,27 +30,32 @@ export interface CodexAccountSummary {
 export interface AppServerRequestOptions {
   codexHomeDir: string;
   cwd: string;
+  codexCommand?: string;
   method: string;
   params: unknown;
 }
 
 export type AppServerRequester = (options: AppServerRequestOptions) => Promise<unknown>;
 
-interface LaunchCodexInput {
-  runtimeHomeDir: string;
+interface RunCodexInput {
+  codexHomeDir?: string;
   cwd: string;
+  args: string[];
+  codexCommand?: string;
   runner?: CommandRunner;
 }
 
 interface LoginCodexInput {
   codexHomeDir: string;
   cwd: string;
+  codexCommand?: string;
   runner?: CommandRunner;
 }
 
 interface ProbeAccountLimitsInput {
   codexHomeDir: string;
   cwd: string;
+  codexCommand?: string;
   runner?: CommandRunner;
   appServerRequester?: AppServerRequester;
 }
@@ -59,6 +63,7 @@ interface ProbeAccountLimitsInput {
 interface ReadCodexAccountInput {
   codexHomeDir: string;
   cwd: string;
+  codexCommand?: string;
   appServerRequester?: AppServerRequester;
 }
 
@@ -106,6 +111,10 @@ function buildCommandEnv(codexHomeDir: string): NodeJS.ProcessEnv {
     ...process.env,
     CODEX_HOME: codexHomeDir,
   };
+}
+
+function resolveCodexCommand(codexCommand?: string): string {
+  return codexCommand ?? "codex";
 }
 
 async function defaultRunner(
@@ -217,7 +226,7 @@ async function defaultAppServerRequester<T>(options: AppServerRequestOptions): P
   await ensureFileAuthConfig(options.codexHomeDir);
 
   return await new Promise<T>((resolve, reject) => {
-    const child = spawn("codex", ["app-server"], {
+    const child = spawn(resolveCodexCommand(options.codexCommand), ["app-server"], {
       cwd: options.cwd,
       env: buildCommandEnv(options.codexHomeDir),
       stdio: ["pipe", "pipe", "pipe"],
@@ -346,6 +355,7 @@ export async function readCodexAccountSummary(
     const response = (await requester({
       codexHomeDir: input.codexHomeDir,
       cwd: input.cwd,
+      ...(input.codexCommand ? { codexCommand: input.codexCommand } : {}),
       method: "account/read",
       params: {},
     })) as AppServerAccountResponse;
@@ -356,13 +366,13 @@ export async function readCodexAccountSummary(
   }
 }
 
-export async function launchCodex(input: LaunchCodexInput): Promise<CommandResult> {
+export async function runCodex(input: RunCodexInput): Promise<CommandResult> {
   const runner = input.runner ?? defaultRunner;
-  const args = (await hasResumeCandidate(input.runtimeHomeDir)) ? ["resume", "--last", "--all"] : [];
+  const env = input.codexHomeDir ? buildCommandEnv(input.codexHomeDir) : process.env;
 
-  return await runner("codex", args, {
+  return await runner(resolveCodexCommand(input.codexCommand), input.args, {
     cwd: input.cwd,
-    env: buildCommandEnv(input.runtimeHomeDir),
+    env,
     stdio: "inherit",
   });
 }
@@ -371,7 +381,7 @@ export async function runCodexLogin(input: LoginCodexInput): Promise<CommandResu
   const runner = input.runner ?? defaultRunner;
   await ensureFileAuthConfig(input.codexHomeDir);
 
-  return await runner("codex", ["login"], {
+  return await runner(resolveCodexCommand(input.codexCommand), ["login"], {
     cwd: input.cwd,
     env: buildCommandEnv(input.codexHomeDir),
     stdio: "inherit",
@@ -382,7 +392,7 @@ export async function getCodexLoginStatus(input: LoginCodexInput): Promise<Comma
   const runner = input.runner ?? defaultRunner;
   await ensureFileAuthConfig(input.codexHomeDir);
 
-  return await runner("codex", ["login", "status"], {
+  return await runner(resolveCodexCommand(input.codexCommand), ["login", "status"], {
     cwd: input.cwd,
     env: buildCommandEnv(input.codexHomeDir),
     stdio: "pipe",
@@ -398,6 +408,7 @@ export async function probeAccountLimits(
     const response = (await requester({
       codexHomeDir: input.codexHomeDir,
       cwd: input.cwd,
+      ...(input.codexCommand ? { codexCommand: input.codexCommand } : {}),
       method: "account/rateLimits/read",
       params: {},
     })) as AppServerRateLimitResponse;
@@ -409,7 +420,7 @@ export async function probeAccountLimits(
 
   const runner = input.runner ?? defaultRunner;
   const result = await runner(
-    "codex",
+    resolveCodexCommand(input.codexCommand),
     ["exec", "--json", "--skip-git-repo-check", "Reply with OK only."],
     {
       cwd: input.cwd,

@@ -18,7 +18,6 @@ export interface AccountRecord {
   authState: AccountAuthState;
   createdAt: string;
   lastSwitchAt?: string;
-  lastLaunchAt?: string;
   lastStatusCheckAt?: string;
   lastKnownStatus?: AccountStatusSnapshot;
 }
@@ -143,19 +142,6 @@ export async function removeAccount(registryPath: string, tag: string): Promise<
 
   registry.accounts = nextAccounts;
   await saveRegistry(registryPath, registry);
-}
-
-export async function markAccountLaunched(
-  registryPath: string,
-  tag: string,
-): Promise<AccountRecord> {
-  const registry = await loadRegistry(registryPath);
-  const account = requireAccount(registry, tag);
-
-  account.lastLaunchAt = now();
-  await saveRegistry(registryPath, registry);
-
-  return account;
 }
 
 export async function markAccountStatusChecked(

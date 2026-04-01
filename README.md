@@ -5,16 +5,26 @@
 ## What it does
 
 - stores multiple tagged accounts such as `codex-1` and `codex-2`
-- switches the active account without overwriting your shared local context
-- assembles a managed runtime `CODEX_HOME` for launches
+- switches the active account used by the router-managed `codex` wrapper
+- keeps your original `~/.codex` untouched
 - refreshes live 5-hour and weekly limit percentages per account
-- provides both a CLI and a lightweight local web UI
+- provides a CLI for account routing
 
 ## Install dependencies
 
 ```bash
 npm install
 ```
+
+## Setup
+
+Run `codex-router init` once to install the optional `codex` shim under `~/.codex-router/bin/codex`.
+
+```bash
+codex-router init
+```
+
+Then add the printed path export to your shell profile so `~/.codex-router/bin` comes before the real Codex binary on `PATH`. This keeps `~/.codex` unchanged while still letting plain `codex` use the selected router account.
 
 ## CLI commands
 
@@ -28,7 +38,6 @@ codex-router current
 codex-router status
 codex-router status -t codex-1
 
-codex-router launch
 codex-router del -t codex-1
 ```
 
@@ -42,27 +51,19 @@ codex-router import
 
 By default this imports from `~/.codex` into `~/.codex-router/shared`.
 
-## GUI
-
-Start the lightweight local web UI:
-
-```bash
-npm run gui
-```
-
-It serves a small browser-based dashboard on `http://127.0.0.1:4035`.
-
 ## Managed layout
 
 `codex-router` keeps its own state under `~/.codex-router`:
 
 - `accounts/<tag>/auth.json` - per-account auth slot
 - `shared/` - sessions, history, MCP config, prompts, and other shared context
-- `runtime/current-home/` - assembled `CODEX_HOME` used for the next launch
+- `runtime/current-home/` - assembled `CODEX_HOME` used by the wrapper-managed `codex`
+- `bin/codex` - optional wrapper installed by `codex-router init`
 - `state/accounts.json` - tag registry and last observed status snapshots
+- `state/wrapper.json` - stored path to the real Codex binary
 
 ## Notes
 
-- live limit refresh is best-effort and currently probes Codex directly, then normalizes the 5-hour and weekly percentages
+- live limit refresh is best-effort and currently reads Codex account/rate-limit state, then normalizes the 5-hour and weekly percentages
 - if live percentages cannot be extracted, the tool reports `unknown` instead of guessing
-- the active account decides which quota Codex uses, while the shared state preserves your local working context
+- the active account decides which quota wrapper-managed `codex` uses, while the shared state preserves your local working context

@@ -1,11 +1,10 @@
-import { readFile, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readlink, readdir, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import {
   getActiveAccount,
   listAccounts,
-  markAccountLaunched,
   recordAccountStatusSnapshot,
   registerAccount,
   removeAccount,
@@ -16,9 +15,9 @@ import {
 } from "./accounts.js";
 import {
   getCodexLoginStatus,
-  launchCodex,
   probeAccountLimits,
   readCodexAccountSummary,
+  runCodex,
   type AppServerRequester,
   runCodexLogin,
   type CommandRunner,
@@ -31,6 +30,13 @@ import {
   seedSharedStateFromCodexHome,
 } from "./runtime-home.js";
 import type { RateLimitSnapshot } from "./status.js";
+import {
+  findRealCodexPath,
+  installCodexWrapper,
+  resolveConfiguredCodexPath,
+  type WrapperInstallResult,
+  type WrapperLauncher,
+} from "./wrapper.js";
 
 export interface AccountStatusResult {
   tag: string;
@@ -40,27 +46,30 @@ export interface AccountStatusResult {
   authStoragePath: string;
   snapshot: RateLimitSnapshot;
   lastSwitchAt?: string;
-  lastLaunchAt?: string;
   lastStatusCheckAt?: string;
 }
 
 interface CreateRouterServiceInput {
   routerHome: string;
   workspaceCwd: string;
+  pathValue?: string;
   runner?: CommandRunner;
   appServerRequester?: AppServerRequester;
 }
 
 export interface RouterService {
   login(tag: string): Promise<AccountRecord>;
+  initWrapper(launcher: WrapperLauncher): Promise<WrapperInstallResult>;
+  runSelectedCodex(args: string[]): Promise<number>;
   switchTo(tag: string): Promise<AccountRecord>;
   current(): Promise<AccountRecord | undefined>;
   deleteTag(tag: string): Promise<void>;
-  launch(): Promise<void>;
   importDefaultCodexHome(sourceCodexHome?: string): Promise<void>;
   statusAll(): Promise<AccountStatusResult[]>;
   statusForTag(tag: string): Promise<AccountStatusResult>;
 }
+
+const ACCOUNT_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function toStatusResult(account: AccountRecord, activeTag?: string): AccountStatusResult {
   return {
@@ -71,9 +80,21 @@ function toStatusResult(account: AccountRecord, activeTag?: string): AccountStat
     snapshot: account.lastKnownStatus ?? { rawLimitSource: "unknown" },
     ...(account.accountIdentity ? { accountIdentity: account.accountIdentity } : {}),
     ...(account.lastSwitchAt ? { lastSwitchAt: account.lastSwitchAt } : {}),
-    ...(account.lastLaunchAt ? { lastLaunchAt: account.lastLaunchAt } : {}),
     ...(account.lastStatusCheckAt ? { lastStatusCheckAt: account.lastStatusCheckAt } : {}),
   };
+}
+
+function validateAccountTag(tag: string): void {
+  if (!ACCOUNT_TAG_PATTERN.test(tag)) {
+    throw new Error(
+      `Invalid account tag: ${tag}. Tags may only contain letters, numbers, dot, underscore, and dash.`,
+    );
+  }
+}
+
+function getAccountHomeDir(accountsDir: string, tag: string): string {
+  validateAccountTag(tag);
+  return path.join(accountsDir, tag);
 }
 
 export function createRouterService(input: CreateRouterServiceInput): RouterService {
@@ -86,23 +107,99 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
   }
 
   async function seedSharedStateIfNeeded(): Promise<void> {
-    await seedSharedStateFromCodexHome({
-      sourceCodexHome: defaultCodexHome,
-      routerHome: input.routerHome,
-    });
+    try {
+      await seedSharedStateFromCodexHome({
+        sourceCodexHome: defaultCodexHome,
+        routerHome: input.routerHome,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("Cannot import from the router-managed runtime home")) {
+        throw error;
+      }
+    }
+  }
+
+  async function restoreLegacyDefaultCodexHome(): Promise<void> {
+    let defaultHomeStat;
+    try {
+      defaultHomeStat = await lstat(defaultCodexHome);
+    } catch (error) {
+      const asNodeError = error as NodeJS.ErrnoException;
+      if (asNodeError.code === "ENOENT") {
+        return;
+      }
+
+      throw error;
+    }
+
+    if (!defaultHomeStat.isSymbolicLink()) {
+      return;
+    }
+
+    try {
+      const symlinkTarget = await readlink(defaultCodexHome);
+      const resolvedSymlinkTarget = path.resolve(path.dirname(defaultCodexHome), symlinkTarget);
+      if (resolvedSymlinkTarget !== layout.runtimeCurrentHomeDir) {
+        return;
+      }
+    } catch {
+      try {
+        const actualTarget = await realpath(defaultCodexHome);
+        if (actualTarget !== layout.runtimeCurrentHomeDir) {
+          return;
+        }
+      } catch {
+        return;
+      }
+    }
+
+    await rm(defaultCodexHome, { force: true, recursive: true });
+
+    const backupsDir = path.join(input.routerHome, "backups");
+    let backupNames: string[] = [];
+    try {
+      backupNames = (await readdir(backupsDir))
+        .filter((name) => name.startsWith("default-codex-home-"))
+        .sort()
+        .reverse();
+    } catch (error) {
+      const asNodeError = error as NodeJS.ErrnoException;
+      if (asNodeError.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    const latestBackup = backupNames[0] ? path.join(backupsDir, backupNames[0]) : undefined;
+    if (latestBackup) {
+      await cp(latestBackup, defaultCodexHome, { recursive: true, dereference: true });
+      return;
+    }
+
+    await mkdir(defaultCodexHome, { recursive: true });
+  }
+
+  async function getCodexCommand(): Promise<string> {
+    if (process.env.CODEX_ROUTER_REAL_CODEX) {
+      return process.env.CODEX_ROUTER_REAL_CODEX;
+    }
+
+    return (await resolveConfiguredCodexPath(input.routerHome)) ?? "codex";
   }
 
   return {
     async login(tag: string): Promise<AccountRecord> {
       await ensureRouterLayout(input.routerHome);
       await seedSharedStateIfNeeded();
+      const codexCommand = await getCodexCommand();
 
-      const accountHomeDir = path.join(layout.accountsDir, tag);
+      const accountHomeDir = getAccountHomeDir(layout.accountsDir, tag);
       const authStoragePath = path.join(accountHomeDir, "auth.json");
 
       const result = await runCodexLogin({
         codexHomeDir: accountHomeDir,
         cwd: input.workspaceCwd,
+        codexCommand,
         ...(input.runner ? { runner: input.runner } : {}),
       });
 
@@ -115,6 +212,7 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
       const accountSummary = await readCodexAccountSummary({
         codexHomeDir: accountHomeDir,
         cwd: input.workspaceCwd,
+        codexCommand,
         ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
       });
 
@@ -123,6 +221,44 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
         authStoragePath,
         ...(accountSummary?.email ? { accountIdentity: accountSummary.email } : {}),
       });
+    },
+
+    async initWrapper(launcher: WrapperLauncher): Promise<WrapperInstallResult> {
+      await ensureRouterLayout(input.routerHome);
+      await restoreLegacyDefaultCodexHome();
+      const realCodexPath = await findRealCodexPath(input.routerHome, input.pathValue);
+      return await installCodexWrapper(input.routerHome, realCodexPath, launcher);
+    },
+
+    async runSelectedCodex(args: string[]): Promise<number> {
+      const codexCommand = await getCodexCommand();
+      const active = await getActiveAccount(layout.registryPath);
+
+      if (!active) {
+        const result = await runCodex({
+          cwd: input.workspaceCwd,
+          args,
+          codexCommand,
+          ...(input.runner ? { runner: input.runner } : {}),
+        });
+        return result.exitCode;
+      }
+
+      await seedSharedStateIfNeeded();
+      await assembleRuntimeHome({
+        routerHome: input.routerHome,
+        tag: active.tag,
+        authSourcePath: active.authStoragePath,
+      });
+
+      const result = await runCodex({
+        codexHomeDir: layout.runtimeCurrentHomeDir,
+        cwd: input.workspaceCwd,
+        args,
+        codexCommand,
+        ...(input.runner ? { runner: input.runner } : {}),
+      });
+      return result.exitCode;
     },
 
     async switchTo(tag: string): Promise<AccountRecord> {
@@ -134,34 +270,9 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
     },
 
     async deleteTag(tag: string): Promise<void> {
+      const accountHomeDir = getAccountHomeDir(layout.accountsDir, tag);
       await removeAccount(layout.registryPath, tag);
-      await rm(path.join(layout.accountsDir, tag), { force: true, recursive: true });
-    },
-
-    async launch(): Promise<void> {
-      const active = await getActiveAccount(layout.registryPath);
-      if (!active) {
-        throw new Error("No active account configured.");
-      }
-
-      await seedSharedStateIfNeeded();
-      await assembleRuntimeHome({
-        routerHome: input.routerHome,
-        tag: active.tag,
-        authSourcePath: active.authStoragePath,
-      });
-
-      const launchResult = await launchCodex({
-        runtimeHomeDir: layout.runtimeCurrentHomeDir,
-        cwd: input.workspaceCwd,
-        ...(input.runner ? { runner: input.runner } : {}),
-      });
-
-      if (launchResult.exitCode !== 0) {
-        throw new Error(launchResult.stderr || "Codex launch failed.");
-      }
-
-      await markAccountLaunched(layout.registryPath, active.tag);
+      await rm(accountHomeDir, { force: true, recursive: true });
     },
 
     async importDefaultCodexHome(sourceCodexHome = path.join(os.homedir(), ".codex")): Promise<void> {
@@ -188,10 +299,12 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
       if (!account) {
         throw new Error(`Unknown account tag: ${tag}`);
       }
+      const codexCommand = await getCodexCommand();
 
       const loginStatus = await getCodexLoginStatus({
         codexHomeDir: path.dirname(account.authStoragePath),
         cwd: input.workspaceCwd,
+        codexCommand,
         ...(input.runner ? { runner: input.runner } : {}),
       });
       const authState = loginStatus.exitCode === 0 ? "ready" : "needs_login";
@@ -211,6 +324,7 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
       const accountSummary = await readCodexAccountSummary({
         codexHomeDir: path.dirname(account.authStoragePath),
         cwd: input.workspaceCwd,
+        codexCommand,
         ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
       });
       await setAccountIdentity(layout.registryPath, account.tag, accountSummary?.email);
@@ -218,6 +332,7 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
       const snapshot = await probeAccountLimits({
         codexHomeDir: path.dirname(account.authStoragePath),
         cwd: input.workspaceCwd,
+        codexCommand,
         ...(input.runner ? { runner: input.runner } : {}),
         ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
       });

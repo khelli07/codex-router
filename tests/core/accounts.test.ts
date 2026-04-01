@@ -8,7 +8,6 @@ import {
   getActiveAccount,
   listAccounts,
   markAccountStatusChecked,
-  markAccountLaunched,
   recordAccountStatusSnapshot,
   registerAccount,
   removeAccount,
@@ -106,7 +105,7 @@ describe("account registry", () => {
     expect(allAccounts.map((account) => account.tag)).toEqual(["codex-1"]);
   });
 
-  test("tracks launch and status refresh timestamps separately", async () => {
+  test("tracks status refresh timestamps separately from switches", async () => {
     const registryPath = await makeRegistryPath();
 
     await registerAccount(registryPath, {
@@ -114,14 +113,11 @@ describe("account registry", () => {
       authStoragePath: "/tmp/codex-1/auth.json",
     });
 
-    const launched = await markAccountLaunched(registryPath, "codex-1");
     const checked = await markAccountStatusChecked(registryPath, "codex-1");
 
-    expect(launched.lastLaunchAt).toBeTruthy();
     expect(checked.lastStatusCheckAt).toBeTruthy();
 
     const active = await getActiveAccount(registryPath);
-    expect(active?.lastLaunchAt).toBeTruthy();
     expect(active?.lastStatusCheckAt).toBeTruthy();
   });
 

@@ -5,27 +5,69 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { updateShellProfile } from "./shell-profile.js";
 import { createRouterService, type RouterService } from "../core/service.js";
+import type { WrapperLauncher } from "../core/wrapper.js";
 
 export interface CliDependencies {
-  createService: (options: { routerHome: string; workspaceCwd: string }) => RouterService;
+  createService: (options: {
+    routerHome: string;
+    workspaceCwd: string;
+    pathValue?: string;
+  }) => RouterService;
   cwd: string;
+  detectLauncher: () => WrapperLauncher;
+  updateShellProfile: (routerBinDir: string) => Promise<{
+    changed: boolean;
+    profilePath?: string;
+    reloadCommand?: string;
+    skippedReason?: string;
+  }>;
+  pathValue?: string;
   routerHome: string;
   writeStdout: (value: string) => void;
   writeStderr: (value: string) => void;
 }
 
+function defaultLauncher(): WrapperLauncher {
+  const entryPath = process.argv[1];
+  if (entryPath?.endsWith(".js")) {
+    return {
+      kind: "node",
+      nodePath: process.execPath,
+      scriptPath: entryPath,
+    };
+  }
+
+  if (entryPath?.endsWith(".ts")) {
+    return {
+      kind: "tsx",
+      tsxPath: path.join(process.cwd(), "node_modules", ".bin", "tsx"),
+      scriptPath: entryPath,
+    };
+  }
+
+  return {
+    kind: "command",
+    command: "codex-router",
+  };
+}
+
 function defaultDependencies(): CliDependencies {
   return {
-    createService: ({ routerHome, workspaceCwd }) =>
+    createService: ({ routerHome, workspaceCwd, pathValue }) =>
       createRouterService({
         routerHome,
         workspaceCwd,
-      }),
+        ...(pathValue ? { pathValue } : {}),
+    }),
     cwd: process.cwd(),
+    detectLauncher: defaultLauncher,
+    updateShellProfile,
     routerHome: path.join(os.homedir(), ".codex-router"),
     writeStdout: (value: string) => process.stdout.write(value),
     writeStderr: (value: string) => process.stderr.write(value),
+    ...(process.env.PATH ? { pathValue: process.env.PATH } : {}),
   };
 }
 
@@ -79,7 +121,6 @@ function renderStatusDetail(status: Awaited<ReturnType<RouterService["statusForT
     `auth_state: ${status.authState}`,
     `auth_storage_path: ${status.authStoragePath}`,
     `last_switch_at: ${formatValue(status.lastSwitchAt)}`,
-    `last_launch_at: ${formatValue(status.lastLaunchAt)}`,
     `last_status_check_at: ${formatValue(status.lastStatusCheckAt)}`,
   ].join("\n");
 }
@@ -91,7 +132,12 @@ export async function runCli(
   const service = dependencies.createService({
     routerHome: dependencies.routerHome,
     workspaceCwd: dependencies.cwd,
+    ...(dependencies.pathValue ? { pathValue: dependencies.pathValue } : {}),
   });
+
+  if (argv[0] === "proxy") {
+    return await service.runSelectedCodex(argv.slice(1));
+  }
 
   const program = new Command();
   program
@@ -106,6 +152,27 @@ export async function runCli(
       const account = await service.login(options.tag);
       dependencies.writeStdout(`Logged in as ${account.tag}\n`);
     });
+
+  program.command("init").action(async () => {
+    const result = await service.initWrapper(dependencies.detectLauncher());
+    dependencies.writeStdout(`Installed codex wrapper at ${result.wrapperPath}\n`);
+    dependencies.writeStdout(`Real codex binary: ${result.realCodexPath}\n`);
+    const shellProfile = await dependencies.updateShellProfile(path.dirname(result.wrapperPath));
+
+    if (shellProfile.profilePath) {
+      dependencies.writeStdout(
+        `${shellProfile.changed ? "Updated" : "Verified"} shell profile: ${shellProfile.profilePath}\n`,
+      );
+      if (shellProfile.reloadCommand) {
+        dependencies.writeStdout(`Reload your shell: ${shellProfile.reloadCommand}\n`);
+      }
+    } else {
+      dependencies.writeStdout(`Add to your shell profile: ${result.pathHint}\n`);
+      if (shellProfile.skippedReason) {
+        dependencies.writeStdout(`${shellProfile.skippedReason}\n`);
+      }
+    }
+  });
 
   program
     .command("switch")
@@ -141,11 +208,6 @@ export async function runCli(
       await service.deleteTag(options.tag);
       dependencies.writeStdout(`Deleted ${options.tag}\n`);
     });
-
-  program.command("launch").action(async () => {
-    await service.launch();
-    dependencies.writeStdout("Launched Codex\n");
-  });
 
   program
     .command("import")

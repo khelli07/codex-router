@@ -1,20 +1,32 @@
 import { describe, expect, test, vi } from "vitest";
 
 import { runCli, type CliDependencies } from "../../src/cli/index.js";
+import type { WrapperInstallResult, WrapperLauncher } from "../../src/core/wrapper.js";
 
 type TestCliDependencies = CliDependencies & { __writes: string[] };
 
 function makeDependencies(overrides: Partial<CliDependencies> = {}): TestCliDependencies {
   const writes: string[] = [];
+  const wrapperResult: WrapperInstallResult = {
+    wrapperPath: "/tmp/codex-router/bin/codex",
+    realCodexPath: "/usr/local/bin/codex",
+    pathHint: "export PATH='/tmp/codex-router/bin':$PATH",
+  };
+  const launcher: WrapperLauncher = {
+    kind: "command",
+    command: "codex-router",
+  };
 
   return {
     createService: () => ({
+      initWrapper: vi.fn(async () => wrapperResult),
       login: vi.fn(async (tag: string) => ({
         tag,
         authStoragePath: `/tmp/${tag}/auth.json`,
         authState: "ready" as const,
         createdAt: new Date().toISOString(),
       })),
+      runSelectedCodex: vi.fn(async () => 0),
       switchTo: vi.fn(async (tag: string) => ({
         tag,
         authStoragePath: `/tmp/${tag}/auth.json`,
@@ -28,7 +40,6 @@ function makeDependencies(overrides: Partial<CliDependencies> = {}): TestCliDepe
         createdAt: new Date().toISOString(),
       })),
       deleteTag: vi.fn(async () => {}),
-      launch: vi.fn(async () => {}),
       importDefaultCodexHome: vi.fn(async () => {}),
       statusAll: vi.fn(async () => [
         {
@@ -58,7 +69,14 @@ function makeDependencies(overrides: Partial<CliDependencies> = {}): TestCliDepe
       })),
     }),
     cwd: "/tmp/project",
+    detectLauncher: () => launcher,
+    pathValue: "/usr/local/bin:/usr/bin",
     routerHome: "/tmp/codex-router",
+    updateShellProfile: vi.fn(async () => ({
+      changed: true,
+      profilePath: "/tmp/.zshrc",
+      reloadCommand: "source ~/.zshrc",
+    })),
     writeStdout: (value: string) => writes.push(value),
     writeStderr: (value: string) => writes.push(value),
     ...overrides,
@@ -99,5 +117,17 @@ describe("CLI", () => {
     expect(output).toContain("tag: codex-1");
     expect(output).toContain("five_hour_used_pct: 17%");
     expect(output).toContain("weekly_used_pct: 66%");
+  });
+
+  test("prints wrapper installation instructions for init", async () => {
+    const deps = makeDependencies();
+
+    const exitCode = await runCli(["init"], deps);
+
+    expect(exitCode).toBe(0);
+    const output = deps.__writes.join("");
+    expect(output).toContain("Installed codex wrapper");
+    expect(output).toContain("Real codex binary");
+    expect(output).toMatch(/(Updated|Verified) shell profile|Add to your shell profile/);
   });
 });
