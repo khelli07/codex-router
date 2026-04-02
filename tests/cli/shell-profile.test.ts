@@ -41,7 +41,19 @@ describe("shell profile setup", () => {
 
     const content = await readFile(path.join(homeDir, ".zshrc"), "utf8");
     expect(content).toContain("# >>> codex-router >>>");
-    expect(content).toContain(`export PATH="${path.join(homeDir, ".codex-router", "bin")}:$PATH"`);
+    expect(content).toContain(`export PATH='${path.join(homeDir, ".codex-router", "bin")}':$PATH`);
+  });
+
+  test("shell-quotes PATH entries before writing the managed block", async () => {
+    const homeDir = await makeTempHome();
+    process.env.SHELL = "/bin/zsh";
+    vi.spyOn(os, "homedir").mockReturnValue(homeDir);
+
+    const routerBinDir = path.join(homeDir, "codex router", "bin$(touch should-not-run)");
+    await updateShellProfile(routerBinDir);
+
+    const content = await readFile(path.join(homeDir, ".zshrc"), "utf8");
+    expect(content).toContain(`export PATH='${routerBinDir}':$PATH`);
   });
 
   test("is idempotent when the managed block already exists", async () => {

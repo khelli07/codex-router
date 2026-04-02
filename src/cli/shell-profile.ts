@@ -22,14 +22,19 @@ const MANAGED_BLOCK_PATTERN = new RegExp(
   "g",
 );
 
+function quoteShell(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
 function detectShellProfileTarget(routerBinDir: string, shellPath = process.env.SHELL, homeDir = os.homedir()): ShellProfileTarget | undefined {
   const shellName = shellPath ? path.basename(shellPath) : undefined;
+  const quotedRouterBinDir = quoteShell(routerBinDir);
 
   if (shellName === "zsh") {
     return {
       profilePath: path.join(homeDir, ".zshrc"),
       reloadCommand: "source ~/.zshrc",
-      snippet: `export PATH="${routerBinDir}:$PATH"`,
+      snippet: `export PATH=${quotedRouterBinDir}:$PATH`,
     };
   }
 
@@ -37,7 +42,7 @@ function detectShellProfileTarget(routerBinDir: string, shellPath = process.env.
     return {
       profilePath: path.join(homeDir, ".bashrc"),
       reloadCommand: "source ~/.bashrc",
-      snippet: `export PATH="${routerBinDir}:$PATH"`,
+      snippet: `export PATH=${quotedRouterBinDir}:$PATH`,
     };
   }
 

@@ -180,6 +180,33 @@ describe("account registry", () => {
     expect(allAccounts).toHaveLength(1);
   });
 
+  test("re-registering an existing tag clears stale identity and status metadata when new data is unavailable", async () => {
+    const registryPath = await makeRegistryPath();
+
+    await registerAccount(registryPath, {
+      tag: "codex-1",
+      authStoragePath: "/tmp/codex-1/auth.json",
+      accountIdentity: "old@example.com",
+    });
+    await recordAccountStatusSnapshot(registryPath, "codex-1", {
+      fiveHourUsedPct: 17,
+      weeklyUsedPct: 66,
+      resetIn: "44m",
+      rawLimitSource: "structured token_count event",
+    });
+
+    const updated = await registerAccount(registryPath, {
+      tag: "codex-1",
+      authStoragePath: "/tmp/codex-1/new-auth.json",
+    });
+
+    expect(updated.authStoragePath).toBe("/tmp/codex-1/new-auth.json");
+    expect(updated.accountIdentity).toBeUndefined();
+    expect(updated.lastKnownStatus).toBeUndefined();
+    expect(updated.lastStatusCheckAt).toBeUndefined();
+    expect(updated.authState).toBe("ready");
+  });
+
   test("registry file has restricted permissions", async () => {
     const registryPath = await makeRegistryPath();
 

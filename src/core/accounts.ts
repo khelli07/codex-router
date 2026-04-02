@@ -101,7 +101,11 @@ export async function registerAccount(
     existing.authState = "ready";
     if (input.accountIdentity) {
       existing.accountIdentity = input.accountIdentity;
+    } else {
+      delete existing.accountIdentity;
     }
+    delete existing.lastKnownStatus;
+    delete existing.lastStatusCheckAt;
     await saveRegistry(registryPath, registry);
     return existing;
   }
