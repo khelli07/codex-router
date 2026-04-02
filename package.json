@@ -6,10 +6,15 @@
   "bin": {
     "codex-router": "./dist/src/cli/index.js"
   },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/src/cli/index.js",
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/cli/index.ts",
+    "prepack": "npm run check && npm test && npm run build",
     "test": "vitest run --dir tests",
     "test:watch": "vitest --dir tests"
   },
