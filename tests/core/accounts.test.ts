@@ -153,5 +153,44 @@ describe("account registry", () => {
     const updated = await setAccountAuthState(registryPath, "codex-1", "needs_login");
 
     expect(updated.authState).toBe("needs_login");
+    expect(updated.lastStatusCheckAt).toBeTruthy();
+  });
+
+  test("re-registering an existing tag updates auth and identity instead of throwing", async () => {
+    const registryPath = await makeRegistryPath();
+
+    await registerAccount(registryPath, {
+      tag: "codex-1",
+      authStoragePath: "/tmp/codex-1/auth.json",
+      accountIdentity: "old@example.com",
+    });
+
+    const updated = await registerAccount(registryPath, {
+      tag: "codex-1",
+      authStoragePath: "/tmp/codex-1/new-auth.json",
+      accountIdentity: "new@example.com",
+    });
+
+    expect(updated.tag).toBe("codex-1");
+    expect(updated.authStoragePath).toBe("/tmp/codex-1/new-auth.json");
+    expect(updated.accountIdentity).toBe("new@example.com");
+    expect(updated.authState).toBe("ready");
+
+    const allAccounts = await listAccounts(registryPath);
+    expect(allAccounts).toHaveLength(1);
+  });
+
+  test("registry file has restricted permissions", async () => {
+    const registryPath = await makeRegistryPath();
+
+    await registerAccount(registryPath, {
+      tag: "codex-1",
+      authStoragePath: "/tmp/codex-1/auth.json",
+    });
+
+    const { stat } = await import("node:fs/promises");
+    const fileStat = await stat(registryPath);
+    const mode = fileStat.mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 });

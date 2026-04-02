@@ -1,8 +1,8 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 
-import { parseRateLimitsFromJsonLines, parseRateLimitsFromText, type RateLimitSnapshot } from "./status.js";
+import { formatResetIn, parseRateLimitsFromJsonLines, parseRateLimitsFromText, type RateLimitSnapshot } from "./status.js";
 
 export interface CommandResult {
   exitCode: number;
@@ -14,6 +14,8 @@ export interface RunCommandOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   stdio?: "inherit" | "pipe";
+  timeoutLabel?: string;
+  timeoutMs?: number;
 }
 
 export type CommandRunner = (
@@ -36,6 +38,9 @@ export interface AppServerRequestOptions {
 }
 
 export type AppServerRequester = (options: AppServerRequestOptions) => Promise<unknown>;
+
+const COMMAND_TIMEOUT_MS = 30_000;
+const APP_SERVER_TIMEOUT_MS = 30_000;
 
 interface RunCodexInput {
   codexHomeDir?: string;
@@ -131,6 +136,26 @@ async function defaultRunner(
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const timeoutMs = options.timeoutMs;
+    const timeout =
+      timeoutMs !== undefined
+        ? setTimeout(() => {
+            if (settled) {
+              return;
+            }
+
+            settled = true;
+            child.kill("SIGTERM");
+            reject(
+              new Error(
+                `${options.timeoutLabel ?? `${command} ${args.join(" ")}`.trim()} timed out after ${
+                  Math.ceil(timeoutMs / 1000)
+                }s.`,
+              ),
+            );
+          }, timeoutMs)
+        : undefined;
 
     child.stdout?.on("data", (chunk: Buffer | string) => {
       stdout += chunk.toString();
@@ -140,8 +165,26 @@ async function defaultRunner(
       stderr += chunk.toString();
     });
 
-    child.on("error", reject);
+    child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      reject(error);
+    });
     child.on("close", (exitCode) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       resolve({
         exitCode: exitCode ?? 1,
         stdout,
@@ -153,8 +196,10 @@ async function defaultRunner(
 
 async function ensureFileAuthConfig(codexHomeDir: string): Promise<void> {
   await mkdir(codexHomeDir, { recursive: true });
+  await chmod(codexHomeDir, 0o700);
   const configPath = path.join(codexHomeDir, "config.toml");
   await writeFile(configPath, 'cli_auth_credentials_store = "file"\n', "utf8");
+  await chmod(configPath, 0o600);
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
@@ -195,27 +240,10 @@ function normalizeAppServerRateLimits(
     ...(primary?.usedPercent !== undefined ? { fiveHourUsedPct: primary.usedPercent } : {}),
     ...(secondary?.usedPercent !== undefined ? { weeklyUsedPct: secondary.usedPercent } : {}),
     ...(typeof primary?.resetsAt === "number"
-      ? {
-          resetIn: parseRateLimitsFromJsonLines(
-            JSON.stringify({
-              type: "token_count",
-              rate_limits: {
-                primary: {
-                  used_percent: primary.usedPercent,
-                  window_minutes: primary.windowDurationMins,
-                  resets_at: primary.resetsAt,
-                },
-                secondary: {
-                  used_percent: secondary?.usedPercent,
-                  window_minutes: secondary?.windowDurationMins,
-                  resets_at: secondary?.resetsAt,
-                },
-                plan_type: response.rateLimits.planType ?? undefined,
-              },
-            }),
-            now,
-          ).resetIn,
-        }
+      ? { resetIn: formatResetIn(primary.resetsAt, now) }
+      : {}),
+    ...(typeof secondary?.resetsAt === "number"
+      ? { weeklyResetIn: formatResetIn(secondary.resetsAt, now) }
       : {}),
     rawLimitSource: "app-server account/rateLimits/read",
     ...(response.rateLimits.planType ? { planType: response.rateLimits.planType } : {}),
@@ -240,12 +268,19 @@ async function defaultAppServerRequester<T>(options: AppServerRequestOptions): P
     const initializeId = 1;
     const requestId = 2;
 
+    const timeout = setTimeout(() => {
+      finish(() =>
+        reject(new Error(`Codex app-server timed out after ${APP_SERVER_TIMEOUT_MS / 1000}s.`)),
+      );
+    }, APP_SERVER_TIMEOUT_MS);
+
     const finish = (callback: () => void): void => {
       if (settled) {
         return;
       }
 
       settled = true;
+      clearTimeout(timeout);
       callback();
       child.kill("SIGTERM");
     };
@@ -304,6 +339,8 @@ async function defaultAppServerRequester<T>(options: AppServerRequestOptions): P
 
     child.on("close", (exitCode) => {
       if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
         reject(
           new Error(
             stderrBuffer.trim() ||
@@ -396,6 +433,8 @@ export async function getCodexLoginStatus(input: LoginCodexInput): Promise<Comma
     cwd: input.cwd,
     env: buildCommandEnv(input.codexHomeDir),
     stdio: "pipe",
+    timeoutLabel: "codex login status",
+    timeoutMs: COMMAND_TIMEOUT_MS,
   });
 }
 
@@ -426,6 +465,8 @@ export async function probeAccountLimits(
       cwd: input.cwd,
       env: buildCommandEnv(input.codexHomeDir),
       stdio: "pipe",
+      timeoutLabel: "codex exec rate-limit probe",
+      timeoutMs: COMMAND_TIMEOUT_MS,
     },
   );
 
@@ -433,7 +474,8 @@ export async function probeAccountLimits(
   if (
     structured.fiveHourUsedPct !== undefined ||
     structured.weeklyUsedPct !== undefined ||
-    structured.resetIn !== undefined
+    structured.resetIn !== undefined ||
+    structured.weeklyResetIn !== undefined
   ) {
     return structured;
   }
@@ -442,7 +484,8 @@ export async function probeAccountLimits(
   if (
     textFallback.fiveHourUsedPct !== undefined ||
     textFallback.weeklyUsedPct !== undefined ||
-    textFallback.resetIn !== undefined
+    textFallback.resetIn !== undefined ||
+    textFallback.weeklyResetIn !== undefined
   ) {
     return textFallback;
   }

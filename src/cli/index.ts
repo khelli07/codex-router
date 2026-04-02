@@ -92,6 +92,10 @@ function formatPercent(value?: number): string {
   return value === undefined ? "unknown" : `${value}%`;
 }
 
+function formatRemainingPercent(used?: number): string {
+  return used === undefined ? "unknown" : `${Math.max(0, 100 - used)}%`;
+}
+
 function formatValue(value?: string): string {
   return value ?? "unknown";
 }
@@ -100,26 +104,102 @@ function pad(value: string, width: number): string {
   return value.padEnd(width, " ");
 }
 
+function colorEnabled(): boolean {
+  if (process.env.NO_COLOR) {
+    return false;
+  }
+
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== "0") {
+    return true;
+  }
+
+  return Boolean(process.stdout.isTTY);
+}
+
+interface ThemeColor {
+  fg: [number, number, number];
+  bold?: boolean;
+}
+
+const THEME = {
+  header: { fg: [116, 138, 168], bold: true },
+  active: { fg: [94, 234, 212], bold: true },
+  healthy: { fg: [110, 231, 183], bold: true },
+  warning: { fg: [251, 191, 36], bold: true },
+  danger: { fg: [248, 113, 113], bold: true },
+  muted: { fg: [148, 163, 184] },
+  text: { fg: [226, 232, 240] },
+  authReady: { fg: [125, 211, 252], bold: true },
+} satisfies Record<string, ThemeColor>;
+
+function colorize(text: string, color: ThemeColor): string {
+  if (!colorEnabled()) {
+    return text;
+  }
+
+  const [red, green, blue] = color.fg;
+  const prefix = color.bold ? "\u001b[1m" : "";
+  return `${prefix}\u001b[38;2;${red};${green};${blue}m${text}\u001b[0m`;
+}
+
+function tintPercent(text: string, used?: number): string {
+  if (used === undefined) {
+    return colorize(text, THEME.muted);
+  }
+
+  const remaining = Math.max(0, 100 - used);
+  if (remaining <= 20) {
+    return colorize(text, THEME.danger);
+  }
+
+  if (remaining <= 50) {
+    return colorize(text, THEME.warning);
+  }
+
+  return colorize(text, THEME.healthy);
+}
+
+function tintAuth(text: string, authState: string): string {
+  if (authState === "ready") {
+    return colorize(text, THEME.authReady);
+  }
+
+  if (authState === "needs_login") {
+    return colorize(text, THEME.danger);
+  }
+
+  return colorize(text, THEME.muted);
+}
+
+function tintActive(text: string, active: boolean): string {
+  return active ? colorize(text, THEME.active) : colorize(text, THEME.text);
+}
+
 function renderStatusTable(statuses: Awaited<ReturnType<RouterService["statusAll"]>>): string {
   const header = [
-    pad("ACTIVE", 8),
-    pad("TAG", 12),
-    pad("5H_USED", 10),
-    pad("WEEKLY_USED", 13),
-    pad("RESET_IN", 12),
-    pad("ACCOUNT", 24),
-    pad("AUTH", 12),
+    colorize(pad("ACTIVE", 8), THEME.header),
+    colorize(pad("TAG", 12), THEME.header),
+    colorize(pad("5H_LEFT", 10), THEME.header),
+    colorize(pad("WEEKLY_LEFT", 13), THEME.header),
+    colorize(pad("5H_RESET", 12), THEME.header),
+    colorize(pad("WEEKLY_RESET", 14), THEME.header),
+    colorize(pad("ACCOUNT", 24), THEME.header),
+    colorize(pad("AUTH", 12), THEME.header),
   ].join("");
 
   const lines = statuses.map((status) =>
     [
-      pad(status.active ? "*" : "", 8),
-      pad(status.tag, 12),
-      pad(formatPercent(status.snapshot.fiveHourUsedPct), 10),
-      pad(formatPercent(status.snapshot.weeklyUsedPct), 13),
-      pad(formatValue(status.snapshot.resetIn), 12),
-      pad(formatValue(status.accountIdentity), 24),
-      pad(status.authState, 12),
+      tintActive(pad(status.active ? "*" : "", 8), status.active),
+      tintActive(pad(status.tag, 12), status.active),
+      tintPercent(pad(formatRemainingPercent(status.snapshot.fiveHourUsedPct), 10), status.snapshot.fiveHourUsedPct),
+      tintPercent(
+        pad(formatRemainingPercent(status.snapshot.weeklyUsedPct), 13),
+        status.snapshot.weeklyUsedPct,
+      ),
+      colorize(pad(formatValue(status.snapshot.resetIn), 12), THEME.muted),
+      colorize(pad(formatValue(status.snapshot.weeklyResetIn), 14), THEME.muted),
+      colorize(pad(formatValue(status.accountIdentity), 24), THEME.text),
+      tintAuth(pad(status.authState, 12), status.authState),
     ].join(""),
   );
 
@@ -130,9 +210,10 @@ function renderStatusDetail(status: Awaited<ReturnType<RouterService["statusForT
   return [
     `tag: ${status.tag}`,
     `active: ${status.active ? "yes" : "no"}`,
-    `five_hour_used_pct: ${formatPercent(status.snapshot.fiveHourUsedPct)}`,
-    `weekly_used_pct: ${formatPercent(status.snapshot.weeklyUsedPct)}`,
-    `reset_in: ${formatValue(status.snapshot.resetIn)}`,
+    `five_hour_left_pct: ${formatRemainingPercent(status.snapshot.fiveHourUsedPct)}`,
+    `weekly_left_pct: ${formatRemainingPercent(status.snapshot.weeklyUsedPct)}`,
+    `five_hour_reset_in: ${formatValue(status.snapshot.resetIn)}`,
+    `weekly_reset_in: ${formatValue(status.snapshot.weeklyResetIn)}`,
     `raw_limit_source: ${status.snapshot.rawLimitSource}`,
     `account: ${formatValue(status.accountIdentity)}`,
     `auth_state: ${status.authState}`,

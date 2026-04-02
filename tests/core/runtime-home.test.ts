@@ -17,6 +17,7 @@ import {
   assembleRuntimeHome,
   ensureRouterLayout,
   importSharedState,
+  persistRuntimeStateToCodexHome,
   seedSharedStateFromCodexHome,
 } from "../../src/core/runtime-home.js";
 
@@ -212,6 +213,73 @@ describe("runtime home assembly", () => {
     expect(persistedModelsTarget).toBe(await realpath(path.join(layout.sharedDir, "models_cache.json")));
   });
 
+  test("propagates runtime deletions back into shared storage on rebuild", async () => {
+    const routerHome = await makeRouterHome();
+    const layout = await ensureRouterLayout(routerHome);
+
+    await mkdir(path.join(layout.sharedDir, "packages"), { recursive: true });
+    await writeFile(path.join(layout.sharedDir, "packages", "keep.txt"), "pkg\n", "utf8");
+    await writeFile(path.join(layout.sharedDir, "history.jsonl"), "history\n", "utf8");
+
+    const authPath = path.join(layout.accountsDir, "codex-1", "auth.json");
+    await mkdir(path.dirname(authPath), { recursive: true });
+    await writeFile(authPath, "{\"access_token\":\"secret\"}\n", "utf8");
+
+    await assembleRuntimeHome({
+      routerHome,
+      tag: "codex-1",
+      authSourcePath: authPath,
+    });
+
+    await rm(path.join(layout.runtimeCurrentHomeDir, "packages"), { force: true, recursive: true });
+    await rm(path.join(layout.runtimeCurrentHomeDir, "history.jsonl"), { force: true });
+
+    await assembleRuntimeHome({
+      routerHome,
+      tag: "codex-1",
+      authSourcePath: authPath,
+    });
+
+    await expect(stat(path.join(layout.sharedDir, "packages"))).rejects.toThrow();
+    await expect(stat(path.join(layout.sharedDir, "history.jsonl"))).rejects.toThrow();
+  });
+
+  test("propagates runtime deletions when persisting back to a codex home", async () => {
+    const routerHome = await makeRouterHome();
+    const layout = await ensureRouterLayout(routerHome);
+    const targetCodexHome = path.join(routerHome, "target-codex-home");
+
+    await mkdir(path.join(layout.sharedDir, "plugins"), { recursive: true });
+    await writeFile(path.join(layout.sharedDir, "plugins", "keep.txt"), "plugin\n", "utf8");
+    await writeFile(path.join(layout.sharedDir, "models_cache.json"), "{\"cached\":true}\n", "utf8");
+
+    const authPath = path.join(layout.accountsDir, "codex-1", "auth.json");
+    await mkdir(path.dirname(authPath), { recursive: true });
+    await writeFile(authPath, "{\"access_token\":\"secret\"}\n", "utf8");
+    await mkdir(path.join(targetCodexHome, "plugins"), { recursive: true });
+    await writeFile(path.join(targetCodexHome, "plugins", "stale.txt"), "stale\n", "utf8");
+    await writeFile(path.join(targetCodexHome, "models_cache.json"), "{\"stale\":true}\n", "utf8");
+
+    await assembleRuntimeHome({
+      routerHome,
+      tag: "codex-1",
+      authSourcePath: authPath,
+    });
+
+    await rm(path.join(layout.runtimeCurrentHomeDir, "plugins"), { force: true, recursive: true });
+    await rm(path.join(layout.runtimeCurrentHomeDir, "models_cache.json"), { force: true });
+
+    await persistRuntimeStateToCodexHome({
+      routerHome,
+      targetCodexHome,
+    });
+
+    await expect(stat(path.join(layout.sharedDir, "plugins"))).rejects.toThrow();
+    await expect(stat(path.join(layout.sharedDir, "models_cache.json"))).rejects.toThrow();
+    await expect(stat(path.join(targetCodexHome, "plugins"))).rejects.toThrow();
+    await expect(stat(path.join(targetCodexHome, "models_cache.json"))).rejects.toThrow();
+  });
+
   test("rewrites runtime config without duplicating managed auth settings", async () => {
     const routerHome = await makeRouterHome();
     const layout = await ensureRouterLayout(routerHome);
@@ -242,7 +310,7 @@ describe("runtime home assembly", () => {
     expect(config).toContain("# Managed by codex-router for codex-2");
   });
 
-  test("refreshes shared config from the source codex home even after shared state exists", async () => {
+  test("mirrors source codex state into shared storage even after shared state exists", async () => {
     const routerHome = await makeRouterHome();
     const sourceHome = path.join(routerHome, "source-codex-home");
     const layout = await ensureRouterLayout(routerHome);
@@ -260,6 +328,52 @@ describe("runtime home assembly", () => {
     await expect(readFile(path.join(layout.sharedDir, "config.toml"), "utf8")).resolves.toContain(
       'model = "gpt-5.5"',
     );
-    await expect(readFile(path.join(layout.sharedDir, "history.jsonl"), "utf8")).resolves.toContain("[]");
+    await expect(readFile(path.join(layout.sharedDir, "history.jsonl"), "utf8")).rejects.toThrow();
+  });
+
+  test("mirrors all non-auth source codex state into shared storage", async () => {
+    const routerHome = await makeRouterHome();
+    const sourceHome = path.join(routerHome, "source-codex-home");
+    const layout = await ensureRouterLayout(routerHome);
+
+    await mkdir(path.join(sourceHome, "skills", ".system"), { recursive: true });
+    await mkdir(path.join(sourceHome, "mcp-servers"), { recursive: true });
+    await mkdir(path.join(sourceHome, "packages"), { recursive: true });
+    await writeFile(path.join(sourceHome, "config.toml"), 'model = "gpt-5.6"\n', "utf8");
+    await writeFile(path.join(sourceHome, "history.jsonl"), "fresh\n", "utf8");
+    await writeFile(path.join(sourceHome, "skills", ".system", "fresh.txt"), "skill\n", "utf8");
+    await writeFile(path.join(sourceHome, "mcp-servers", "fresh.json"), "{\"ok\":true}\n", "utf8");
+    await writeFile(path.join(sourceHome, "packages", "fresh.txt"), "pkg\n", "utf8");
+
+    await mkdir(path.join(layout.sharedDir, "skills", ".system"), { recursive: true });
+    await mkdir(path.join(layout.sharedDir, "mcp-servers"), { recursive: true });
+    await mkdir(path.join(layout.sharedDir, "plugins"), { recursive: true });
+    await mkdir(path.join(layout.sharedDir, "packages"), { recursive: true });
+    await writeFile(path.join(layout.sharedDir, "config.toml"), 'model = "gpt-5.4"\n', "utf8");
+    await writeFile(path.join(layout.sharedDir, "skills", ".system", "old.txt"), "old\n", "utf8");
+    await writeFile(path.join(layout.sharedDir, "mcp-servers", "old.json"), "{\"old\":true}\n", "utf8");
+    await writeFile(path.join(layout.sharedDir, "plugins", "old.txt"), "plugin\n", "utf8");
+    await writeFile(path.join(layout.sharedDir, "history.jsonl"), "[]\n", "utf8");
+    await writeFile(path.join(layout.sharedDir, "packages", "old.txt"), "old\n", "utf8");
+
+    await seedSharedStateFromCodexHome({
+      sourceCodexHome: sourceHome,
+      routerHome,
+    });
+
+    await expect(readFile(path.join(layout.sharedDir, "config.toml"), "utf8")).resolves.toContain(
+      'model = "gpt-5.6"',
+    );
+    await expect(readFile(path.join(layout.sharedDir, "skills", ".system", "fresh.txt"), "utf8")).resolves.toContain(
+      "skill",
+    );
+    await expect(readFile(path.join(layout.sharedDir, "mcp-servers", "fresh.json"), "utf8")).resolves.toContain(
+      "\"ok\":true",
+    );
+    await expect(readFile(path.join(layout.sharedDir, "packages", "fresh.txt"), "utf8")).resolves.toContain(
+      "pkg",
+    );
+    await expect(stat(path.join(layout.sharedDir, "plugins"))).rejects.toThrow();
+    await expect(readFile(path.join(layout.sharedDir, "history.jsonl"), "utf8")).resolves.toContain("fresh");
   });
 });

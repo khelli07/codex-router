@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export type AccountAuthState = "ready" | "needs_login" | "invalid" | "unknown";
@@ -7,6 +7,7 @@ export interface AccountStatusSnapshot {
   fiveHourUsedPct?: number;
   weeklyUsedPct?: number;
   resetIn?: string;
+  weeklyResetIn?: string;
   rawLimitSource: string;
   planType?: string;
 }
@@ -39,6 +40,7 @@ const DEFAULT_REGISTRY: AccountRegistry = {
 
 async function ensureRegistryDirectory(registryPath: string): Promise<void> {
   await mkdir(path.dirname(registryPath), { recursive: true });
+  await chmod(path.dirname(registryPath), 0o700);
 }
 
 async function loadRegistry(registryPath: string): Promise<AccountRegistry> {
@@ -57,7 +59,10 @@ async function loadRegistry(registryPath: string): Promise<AccountRegistry> {
 
 async function saveRegistry(registryPath: string, registry: AccountRegistry): Promise<void> {
   await ensureRegistryDirectory(registryPath);
-  await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
+  const tempPath = `${registryPath}.${process.pid}.tmp`;
+  await writeFile(tempPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
+  await chmod(tempPath, 0o600);
+  await rename(tempPath, registryPath);
 }
 
 function requireAccount(registry: AccountRegistry, tag: string): AccountRecord {
@@ -89,9 +94,16 @@ export async function registerAccount(
   input: RegisterAccountInput,
 ): Promise<AccountRecord> {
   const registry = await loadRegistry(registryPath);
+  const existing = registry.accounts.find((entry) => entry.tag === input.tag);
 
-  if (registry.accounts.some((entry) => entry.tag === input.tag)) {
-    throw new Error(`Account tag already exists: ${input.tag}`);
+  if (existing) {
+    existing.authStoragePath = input.authStoragePath;
+    existing.authState = "ready";
+    if (input.accountIdentity) {
+      existing.accountIdentity = input.accountIdentity;
+    }
+    await saveRegistry(registryPath, registry);
+    return existing;
   }
 
   const account: AccountRecord = {
@@ -181,6 +193,7 @@ export async function setAccountAuthState(
   const account = requireAccount(registry, tag);
 
   account.authState = authState;
+  account.lastStatusCheckAt = now();
   await saveRegistry(registryPath, registry);
 
   return account;

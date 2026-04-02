@@ -2,6 +2,7 @@ export interface RateLimitSnapshot {
   fiveHourUsedPct?: number;
   weeklyUsedPct?: number;
   resetIn?: string;
+  weeklyResetIn?: string;
   rawLimitSource: string;
   planType?: string;
 }
@@ -37,6 +38,24 @@ export function formatResetIn(resetsAtSeconds: number, now = new Date()): string
 
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+
+  if (days > 0) {
+    if (minutes === 0 && remainingHours === 0) {
+      return `${days}d`;
+    }
+
+    if (minutes === 0) {
+      return `${days}d ${remainingHours}h`;
+    }
+
+    if (remainingHours === 0) {
+      return `${days}d ${minutes}m`;
+    }
+
+    return `${days}d ${remainingHours}h`;
+  }
 
   if (minutes === 0) {
     return `${hours}h`;
@@ -58,6 +77,9 @@ function normalizeStructuredRateLimits(
     ...(weekly?.used_percent !== undefined ? { weeklyUsedPct: weekly.used_percent } : {}),
     ...(typeof fiveHour?.resets_at === "number"
       ? { resetIn: formatResetIn(fiveHour.resets_at, now) }
+      : {}),
+    ...(typeof weekly?.resets_at === "number"
+      ? { weeklyResetIn: formatResetIn(weekly.resets_at, now) }
       : {}),
     rawLimitSource: "structured token_count event",
     ...(rateLimits.plan_type ? { planType: rateLimits.plan_type } : {}),
@@ -110,12 +132,14 @@ function parsePercent(pattern: RegExp, text: string): number | undefined {
 export function parseRateLimitsFromText(text: string): RateLimitSnapshot {
   const fiveHourUsedPct = parsePercent(/5(?:-hour| hour|h)\D+(\d{1,3})%/i, text);
   const weeklyUsedPct = parsePercent(/weekly\D+(\d{1,3})%/i, text);
-  const resetMatch = text.match(/reset(?:s)?(?: in)?\s+([0-9]+[mh](?:\s+[0-9]+m)*)/i);
+  const resetMatch = text.match(/reset(?:s)?(?: in)?\s+([0-9]+[dhm](?:\s+[0-9]+[hm])*)/i);
+  const weeklyResetMatch = text.match(/weekly\s+reset(?:s)?(?: in)?\s+([0-9]+[dhm](?:\s+[0-9]+[hm])*)/i);
 
   return {
     ...(fiveHourUsedPct !== undefined ? { fiveHourUsedPct } : {}),
     ...(weeklyUsedPct !== undefined ? { weeklyUsedPct } : {}),
     ...(resetMatch?.[1] ? { resetIn: resetMatch[1] } : {}),
+    ...(weeklyResetMatch?.[1] ? { weeklyResetIn: weeklyResetMatch[1] } : {}),
     rawLimitSource: "text fallback",
   };
 }

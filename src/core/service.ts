@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { chmod, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -26,9 +26,11 @@ import { getRouterLayout } from "./paths.js";
 import {
   assembleRuntimeHome,
   ensureRouterLayout,
+  persistRuntimeStateToCodexHome,
   seedSharedStateFromCodexHome,
 } from "./runtime-home.js";
 import type { RateLimitSnapshot } from "./status.js";
+import type { AccountAuthState } from "./accounts.js";
 import {
   findRealCodexPath,
   installCodexWrapper,
@@ -68,6 +70,7 @@ export interface RouterService {
 }
 
 const ACCOUNT_TAG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const STATUS_PROBE_CONCURRENCY = 4;
 
 function toStatusResult(account: AccountRecord, activeTag?: string): AccountStatusResult {
   return {
@@ -95,6 +98,31 @@ function getAccountHomeDir(accountsDir: string, tag: string): string {
   return path.join(accountsDir, tag);
 }
 
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  limit: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(values.length);
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+
+      if (currentIndex >= values.length) {
+        return;
+      }
+
+      results[currentIndex] = await mapper(values[currentIndex]!);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => worker()));
+  return results;
+}
+
 export function createRouterService(input: CreateRouterServiceInput): RouterService {
   const layout = getRouterLayout(input.routerHome);
   const defaultCodexHome = path.join(os.homedir(), ".codex");
@@ -116,6 +144,13 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
         throw error;
       }
     }
+  }
+
+  async function syncSharedStateBackToDefaultCodexHome(): Promise<void> {
+    await persistRuntimeStateToCodexHome({
+      routerHome: input.routerHome,
+      targetCodexHome: defaultCodexHome,
+    });
   }
 
   async function getCodexCommand(): Promise<string> {
@@ -146,7 +181,15 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
         throw new Error(result.stderr || `Codex login failed for ${tag}`);
       }
 
-      await readFile(authStoragePath, "utf8");
+      try {
+        await readFile(authStoragePath, "utf8");
+      } catch {
+        throw new Error(
+          `Login completed but auth file not found at ${authStoragePath}. ` +
+          `The codex version may not support file-based auth storage.`,
+        );
+      }
+      await chmod(authStoragePath, 0o600);
 
       const accountSummary = await readCodexAccountSummary({
         codexHomeDir: accountHomeDir,
@@ -189,14 +232,18 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
         authSourcePath: active.authStoragePath,
       });
 
-      const result = await runCodex({
-        codexHomeDir: layout.runtimeCurrentHomeDir,
-        cwd: input.workspaceCwd,
-        args,
-        codexCommand,
-        ...(input.runner ? { runner: input.runner } : {}),
-      });
-      return result.exitCode;
+      try {
+        const result = await runCodex({
+          codexHomeDir: layout.runtimeCurrentHomeDir,
+          cwd: input.workspaceCwd,
+          args,
+          codexCommand,
+          ...(input.runner ? { runner: input.runner } : {}),
+        });
+        return result.exitCode;
+      } finally {
+        await syncSharedStateBackToDefaultCodexHome();
+      }
     },
 
     async switchTo(tag: string): Promise<AccountRecord> {
@@ -215,13 +262,60 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
 
     async statusAll(): Promise<AccountStatusResult[]> {
       const accounts = await listAccounts(layout.registryPath);
-      const refreshed: AccountStatusResult[] = [];
-      for (const account of accounts) {
-        refreshed.push(await this.statusForTag(account.tag));
-      }
-      const activeTag = await getActiveTag();
+      const codexCommand = await getCodexCommand();
 
-      return refreshed.sort((left, right) => Number(right.tag === activeTag) - Number(left.tag === activeTag));
+      const probeResults = await mapWithConcurrency(
+        accounts,
+        STATUS_PROBE_CONCURRENCY,
+        async (account) => {
+          const codexHomeDir = path.dirname(account.authStoragePath);
+          const loginStatus = await getCodexLoginStatus({
+            codexHomeDir,
+            cwd: input.workspaceCwd,
+            codexCommand,
+            ...(input.runner ? { runner: input.runner } : {}),
+          });
+          const authState: AccountAuthState = loginStatus.exitCode === 0 ? "ready" : "needs_login";
+
+          if (authState !== "ready") {
+            return { tag: account.tag, authState, email: undefined, snapshot: undefined };
+          }
+
+          const [accountSummary, snapshot] = await Promise.all([
+            readCodexAccountSummary({
+              codexHomeDir,
+              cwd: input.workspaceCwd,
+              codexCommand,
+              ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
+            }),
+            probeAccountLimits({
+              codexHomeDir,
+              cwd: input.workspaceCwd,
+              codexCommand,
+              ...(input.runner ? { runner: input.runner } : {}),
+              ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
+            }),
+          ]);
+
+          return { tag: account.tag, authState, email: accountSummary?.email, snapshot };
+        },
+      );
+
+      for (const result of probeResults) {
+        await setAccountAuthState(layout.registryPath, result.tag, result.authState);
+        if (result.authState === "ready") {
+          await setAccountIdentity(layout.registryPath, result.tag, result.email);
+          if (result.snapshot) {
+            await recordAccountStatusSnapshot(layout.registryPath, result.tag, result.snapshot);
+          }
+        }
+      }
+
+      const refreshedAccounts = await listAccounts(layout.registryPath);
+      const activeTag = await getActiveTag();
+      return refreshedAccounts
+        .map((account) => toStatusResult(account, activeTag))
+        .sort((left, right) => Number(right.active) - Number(left.active));
     },
 
     async statusForTag(tag: string): Promise<AccountStatusResult> {
@@ -231,9 +325,10 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
         throw new Error(`Unknown account tag: ${tag}`);
       }
       const codexCommand = await getCodexCommand();
+      const codexHomeDir = path.dirname(account.authStoragePath);
 
       const loginStatus = await getCodexLoginStatus({
-        codexHomeDir: path.dirname(account.authStoragePath),
+        codexHomeDir,
         cwd: input.workspaceCwd,
         codexCommand,
         ...(input.runner ? { runner: input.runner } : {}),
@@ -252,21 +347,22 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
         return toStatusResult(refreshed, activeTag);
       }
 
-      const accountSummary = await readCodexAccountSummary({
-        codexHomeDir: path.dirname(account.authStoragePath),
-        cwd: input.workspaceCwd,
-        codexCommand,
-        ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
-      });
+      const [accountSummary, snapshot] = await Promise.all([
+        readCodexAccountSummary({
+          codexHomeDir,
+          cwd: input.workspaceCwd,
+          codexCommand,
+          ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
+        }),
+        probeAccountLimits({
+          codexHomeDir,
+          cwd: input.workspaceCwd,
+          codexCommand,
+          ...(input.runner ? { runner: input.runner } : {}),
+          ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
+        }),
+      ]);
       await setAccountIdentity(layout.registryPath, account.tag, accountSummary?.email);
-
-      const snapshot = await probeAccountLimits({
-        codexHomeDir: path.dirname(account.authStoragePath),
-        cwd: input.workspaceCwd,
-        codexCommand,
-        ...(input.runner ? { runner: input.runner } : {}),
-        ...(input.appServerRequester ? { appServerRequester: input.appServerRequester } : {}),
-      });
       const updated = await recordAccountStatusSnapshot(layout.registryPath, account.tag, snapshot);
       const activeTag = await getActiveTag();
 

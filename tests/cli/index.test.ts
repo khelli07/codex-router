@@ -50,6 +50,7 @@ function makeDependencies(overrides: Partial<CliDependencies> = {}): TestCliDepe
             fiveHourUsedPct: 68,
             weeklyUsedPct: 41,
             resetIn: "14m",
+            weeklyResetIn: "6d 4h",
             rawLimitSource: "structured token_count event",
           },
         },
@@ -63,6 +64,7 @@ function makeDependencies(overrides: Partial<CliDependencies> = {}): TestCliDepe
           fiveHourUsedPct: 17,
           weeklyUsedPct: 66,
           resetIn: "44m",
+          weeklyResetIn: "5d 12h",
           rawLimitSource: "structured token_count event",
         },
       })),
@@ -109,17 +111,18 @@ describe("CLI", () => {
     expect(deps.__writes.join("")).toContain("codex-2");
   });
 
-  test("prints the usage-first table for status", async () => {
+  test("prints the remaining-limit themed table for status", async () => {
     const deps = makeDependencies();
 
     const exitCode = await runCli(["status"], deps);
 
     expect(exitCode).toBe(0);
     const output = deps.__writes.join("");
-    expect(output).toContain("5H_USED");
-    expect(output).toContain("WEEKLY_USED");
-    expect(output).toContain("68%");
-    expect(output).toContain("41%");
+    expect(output).toContain("5H_LEFT");
+    expect(output).toContain("WEEKLY_LEFT");
+    expect(output).toContain("32%");
+    expect(output).toContain("59%");
+    expect(output).toContain("6d 4h");
   });
 
   test("prints single-tag detail for status -t", async () => {
@@ -130,8 +133,9 @@ describe("CLI", () => {
     expect(exitCode).toBe(0);
     const output = deps.__writes.join("");
     expect(output).toContain("tag: codex-1");
-    expect(output).toContain("five_hour_used_pct: 17%");
-    expect(output).toContain("weekly_used_pct: 66%");
+    expect(output).toContain("five_hour_left_pct: 83%");
+    expect(output).toContain("weekly_left_pct: 34%");
+    expect(output).toContain("weekly_reset_in: 5d 12h");
   });
 
   test("prints wrapper installation instructions for init", async () => {

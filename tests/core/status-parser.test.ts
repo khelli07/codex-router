@@ -7,7 +7,7 @@ import {
 } from "../../src/core/status.js";
 
 describe("status parsing", () => {
-  test("extracts 5-hour and weekly percentages from Codex JSONL token_count events", () => {
+  test("extracts 5-hour and weekly percentages plus reset windows from Codex JSONL token_count events", () => {
     const output = [
       "{\"type\":\"thread.started\"}",
       JSON.stringify({
@@ -34,17 +34,19 @@ describe("status parsing", () => {
     expect(parsed.fiveHourUsedPct).toBe(68);
     expect(parsed.weeklyUsedPct).toBe(41);
     expect(parsed.resetIn).toBeTruthy();
+    expect(parsed.weeklyResetIn).toBeTruthy();
     expect(parsed.rawLimitSource).toContain("token_count");
   });
 
   test("falls back to text parsing when structured JSON is unavailable", () => {
     const parsed = parseRateLimitsFromText(
-      "Usage: 5h window 12% used, weekly 77% used, resets in 52m",
+      "Usage: 5h window 12% used, weekly 77% used, resets in 52m, weekly resets in 6d 4h",
     );
 
     expect(parsed.fiveHourUsedPct).toBe(12);
     expect(parsed.weeklyUsedPct).toBe(77);
     expect(parsed.resetIn).toBe("52m");
+    expect(parsed.weeklyResetIn).toBe("6d 4h");
   });
 
   test("formats short reset windows for human readable output", () => {

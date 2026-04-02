@@ -84,7 +84,9 @@ export async function resolveConfiguredCodexPath(routerHome: string): Promise<st
 async function writeWrapperConfig(routerHome: string, config: WrapperConfig): Promise<void> {
   const configPath = getWrapperConfigPath(routerHome);
   await mkdir(path.dirname(configPath), { recursive: true });
+  await chmod(path.dirname(configPath), 0o700);
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  await chmod(configPath, 0o600);
 }
 
 async function isExecutable(targetPath: string): Promise<boolean> {
@@ -128,6 +130,7 @@ export async function installCodexWrapper(
 ): Promise<WrapperInstallResult> {
   const wrapperPath = getWrapperPath(routerHome);
   await mkdir(path.dirname(wrapperPath), { recursive: true });
+  await chmod(path.dirname(wrapperPath), 0o700);
   await writeFile(wrapperPath, renderWrapperScript(realCodexPath, launcher), "utf8");
   await chmod(wrapperPath, 0o755);
   await writeWrapperConfig(routerHome, { realCodexPath });
