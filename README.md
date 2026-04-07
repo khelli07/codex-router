@@ -29,14 +29,14 @@ That means you can switch accounts without manually rebuilding your local setup 
 `codex-router` treats local Codex state in two buckets:
 
 - auth state: stored per tag under `~/.codex-router/accounts/<tag>/auth.json`
-- non-auth state: mirrored with `~/.codex`
+- non-auth state: stored canonically under `~/.codex-router/shared`
 
 Current flow:
 
 1. `codex-router login -t <tag>` logs in one tagged account.
 2. `codex-router switch <tag>` marks that tag as active.
 3. routed `codex` launches use that active tag's auth.
-4. non-auth state is mirrored between `~/.codex` and `~/.codex-router`.
+4. routed `codex` launches use a thin runtime overlay over router-managed shared state.
 
 The intended result is:
 
@@ -96,6 +96,8 @@ That installs:
 ```
 
 Then add the printed path export to your shell profile so `~/.codex-router/bin` comes before the real Codex binary on `PATH`.
+
+If `~/.codex-router/shared` is still empty and `~/.codex` exists, `init` also imports your existing non-auth Codex state one time into router-managed shared storage. `~/.codex` is read only during that bootstrap and is not modified afterward.
 
 After that:
 
@@ -233,17 +235,17 @@ last_status_check_at: 2026-04-02T...
 
 When run in an interactive terminal, the table is themed with colors. When piped or when `NO_COLOR` is set, it falls back to plain text.
 
-## Mirroring Behavior
+## Shared State Behavior
 
-`codex-router` currently mirrors non-auth state between `~/.codex` and `~/.codex-router`.
+`codex-router` keeps non-auth state under `~/.codex-router/shared`.
 
 Current intended behavior:
 
-- tagged login refreshes router shared state from `~/.codex`
-- routed `codex` launch refreshes router shared state from `~/.codex`
-- after routed `codex` exits, runtime non-auth state is synced back into `~/.codex`
+- `init` may import existing non-auth state from `~/.codex` one time when router shared state is still empty
+- routed `codex` launches use `runtime/current-home/` as a thin overlay with shared symlinks plus the active tag's `auth.json`
+- runtime changes stay in router-managed shared state rather than syncing back into `~/.codex`
 
-This is meant to keep account auth separate while keeping the local Codex environment shared.
+This keeps account auth separate while keeping the local Codex environment shared across accounts.
 
 ## Managed Layout
 
@@ -256,7 +258,7 @@ This is meant to keep account auth separate while keeping the local Codex enviro
 Important paths:
 
 - `accounts/<tag>/auth.json` — per-account auth slot
-- `shared/` — mirrored non-auth shared state
+- `shared/` — canonical non-auth shared state
 - `runtime/current-home/` — assembled runtime `CODEX_HOME` used by routed `codex`
 - `bin/codex` — optional wrapper installed by `codex-router init`
 - `state/accounts.json` — tag registry and last observed status snapshots
@@ -400,8 +402,8 @@ npm pack --dry-run
 
 This project is still beta. In particular:
 
-- mirroring semantics are still being refined
-- edge cases around deletion/sync behavior may still need work
+- runtime overlay and shared-state persistence semantics are still being refined
+- edge cases around new top-level state created by Codex may still need work
 - account-reuse and status metadata flows may still need more hardening
 - UX and output formatting are still evolving
 

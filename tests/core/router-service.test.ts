@@ -92,47 +92,37 @@ describe("router service", () => {
     await expect(service.login("/tmp/escape")).rejects.toThrow(/invalid account tag/i);
   });
 
-  test("seeds shared state from the default Codex home on first tagged login", async () => {
+  test("bootstraps shared state from the default Codex home during init", async () => {
     const fakeHome = await prepareFakeCodexHome();
     const routerHome = await makeTempDir();
     const defaultCodexHome = path.join(fakeHome, ".codex");
+    const binDir = await makeTempDir();
+    const realCodexPath = path.join(binDir, "codex");
 
-    await rm(routerHome, { force: true, recursive: true });
     await writeFile(path.join(defaultCodexHome, "config.toml"), "model = \"gpt-5.4\"\n", "utf8");
     await mkdir(path.join(defaultCodexHome, "skills", ".system"), { recursive: true });
     await writeFile(path.join(defaultCodexHome, "skills", ".system", "keep.txt"), "skill\n", "utf8");
     await writeFile(path.join(defaultCodexHome, "auth.json"), "{\"do\":\"not-copy\"}\n", "utf8");
+    await writeFile(realCodexPath, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(realCodexPath, 0o755);
 
     const service = createRouterService({
       routerHome,
       workspaceCwd: "/tmp/project",
-      appServerRequester: async ({ method }) => {
-        if (method === "account/read") {
-          return {
-            account: {
-              type: "chatgpt",
-              email: "codex-1@example.com",
-              planType: "plus",
-            },
-            requiresOpenaiAuth: true,
-          };
-        }
-
-        throw new Error(`Unexpected method: ${method}`);
-      },
-      runner: async (_command, args, options) => {
-        if (args[0] === "login") {
-          await writeFile(path.join(options.env.CODEX_HOME!, "auth.json"), "{\"token\":true}\n", "utf8");
-        }
-
-        return { exitCode: 0, stderr: "", stdout: "" };
-      },
+      pathValue: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     });
 
-    await service.login("codex-1");
+    const result = await service.initWrapper({
+      kind: "command",
+      command: "codex-router",
+    });
 
+    expect(result.bootstrapStatus).toBe("imported");
     await expect(readFile(path.join(routerHome, "shared", "config.toml"), "utf8")).resolves.toContain(
       "gpt-5.4",
+    );
+    await expect(readFile(path.join(routerHome, "shared", "config.toml"), "utf8")).resolves.toContain(
+      'cli_auth_credentials_store = "file"',
     );
     await expect(readFile(path.join(routerHome, "shared", "skills", ".system", "keep.txt"), "utf8")).resolves.toContain(
       "skill",
@@ -140,48 +130,36 @@ describe("router service", () => {
     await expect(stat(path.join(routerHome, "shared", "auth.json"))).rejects.toThrow();
   });
 
-  test("mirrors default codex state on tagged login when shared state already exists", async () => {
+  test("skips bootstrap import during init when shared state already exists", async () => {
     const fakeHome = await prepareFakeCodexHome();
     const routerHome = await makeTempDir();
     const defaultCodexHome = path.join(fakeHome, ".codex");
+    const binDir = await makeTempDir();
+    const realCodexPath = path.join(binDir, "codex");
 
     await mkdir(path.join(routerHome, "shared"), { recursive: true });
     await writeFile(path.join(routerHome, "shared", "config.toml"), 'model = "gpt-5.4"\n', "utf8");
     await writeFile(path.join(routerHome, "shared", "history.jsonl"), "[]\n", "utf8");
     await writeFile(path.join(defaultCodexHome, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
+    await writeFile(realCodexPath, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(realCodexPath, 0o755);
 
     const service = createRouterService({
       routerHome,
       workspaceCwd: "/tmp/project",
-      appServerRequester: async ({ method }) => {
-        if (method === "account/read") {
-          return {
-            account: {
-              type: "chatgpt",
-              email: "codex-1@example.com",
-              planType: "plus",
-            },
-            requiresOpenaiAuth: true,
-          };
-        }
-
-        throw new Error(`Unexpected method: ${method}`);
-      },
-      runner: async (_command, args, options) => {
-        if (args[0] === "login") {
-          await writeFile(path.join(options.env.CODEX_HOME!, "auth.json"), "{\"token\":true}\n", "utf8");
-        }
-
-        return { exitCode: 0, stderr: "", stdout: "" };
-      },
+      pathValue: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     });
 
-    await service.login("codex-1");
+    const result = await service.initWrapper({
+      kind: "command",
+      command: "codex-router",
+    });
 
+    expect(result.bootstrapStatus).toBe("skipped");
     await expect(readFile(path.join(routerHome, "shared", "config.toml"), "utf8")).resolves.toContain(
-      'model = "gpt-5.5"',
+      'model = "gpt-5.4"',
     );
-    await expect(readFile(path.join(routerHome, "shared", "history.jsonl"), "utf8")).rejects.toThrow();
+    await expect(readFile(path.join(routerHome, "shared", "history.jsonl"), "utf8")).resolves.toContain("[]");
   });
 
   test("refreshes a tag status and stores live 5-hour and weekly percentages", async () => {
@@ -376,30 +354,18 @@ describe("router service", () => {
     expect(invocations.at(-1)?.codexHome).toBe(path.join(routerHome, "runtime", "current-home"));
   });
 
-  test("mirrors default codex state before routed runs and persists runtime changes back", async () => {
+  test("keeps routed runtime changes in router shared state without mutating the default codex home", async () => {
     const fakeHome = await prepareFakeCodexHome();
     const routerHome = await makeTempDir();
     const defaultCodexHome = path.join(fakeHome, ".codex");
 
-    await mkdir(path.join(defaultCodexHome, "skills", ".system"), { recursive: true });
-    await mkdir(path.join(defaultCodexHome, "mcp-servers"), { recursive: true });
-    await mkdir(path.join(defaultCodexHome, "plugins"), { recursive: true });
-    await mkdir(path.join(defaultCodexHome, "packages"), { recursive: true });
     await writeFile(path.join(defaultCodexHome, "config.toml"), 'model = "gpt-5.6"\n', "utf8");
     await writeFile(path.join(defaultCodexHome, "history.jsonl"), "from-source\n", "utf8");
-    await writeFile(path.join(defaultCodexHome, "skills", ".system", "fresh.txt"), "skill\n", "utf8");
-    await writeFile(path.join(defaultCodexHome, "mcp-servers", "fresh.json"), "{\"ok\":true}\n", "utf8");
-    await writeFile(path.join(defaultCodexHome, "plugins", "fresh.txt"), "plugin\n", "utf8");
-    await writeFile(path.join(defaultCodexHome, "packages", "fresh.txt"), "pkg\n", "utf8");
 
     await mkdir(path.join(routerHome, "shared", "skills", ".system"), { recursive: true });
-    await mkdir(path.join(routerHome, "shared", "plugins"), { recursive: true });
-    await mkdir(path.join(routerHome, "shared", "packages"), { recursive: true });
     await writeFile(path.join(routerHome, "shared", "config.toml"), 'model = "gpt-5.4"\n', "utf8");
     await writeFile(path.join(routerHome, "shared", "history.jsonl"), "[]\n", "utf8");
     await writeFile(path.join(routerHome, "shared", "skills", ".system", "old.txt"), "old\n", "utf8");
-    await writeFile(path.join(routerHome, "shared", "plugins", "old.txt"), "old\n", "utf8");
-    await writeFile(path.join(routerHome, "shared", "packages", "old.txt"), "old\n", "utf8");
 
     const service = createRouterService({
       routerHome,
@@ -429,6 +395,8 @@ describe("router service", () => {
           await writeFile(path.join(options.env.CODEX_HOME, "history.jsonl"), "from-runtime\n", "utf8");
           await mkdir(path.join(options.env.CODEX_HOME, "packages"), { recursive: true });
           await writeFile(path.join(options.env.CODEX_HOME, "packages", "runtime.txt"), "runtime\n", "utf8");
+          await mkdir(path.join(options.env.CODEX_HOME, "plugins"), { recursive: true });
+          await writeFile(path.join(options.env.CODEX_HOME, "plugins", "fresh.txt"), "plugin\n", "utf8");
         }
 
         return { exitCode: 0, stderr: "", stdout: "" };
@@ -442,12 +410,6 @@ describe("router service", () => {
     await expect(readFile(path.join(routerHome, "shared", "config.toml"), "utf8")).resolves.toContain(
       'model = "gpt-5.7"',
     );
-    await expect(readFile(path.join(routerHome, "shared", "skills", ".system", "fresh.txt"), "utf8")).resolves.toContain(
-      "skill",
-    );
-    await expect(readFile(path.join(routerHome, "shared", "mcp-servers", "fresh.json"), "utf8")).resolves.toContain(
-      "\"ok\":true",
-    );
     await expect(readFile(path.join(routerHome, "shared", "plugins", "fresh.txt"), "utf8")).resolves.toContain(
       "plugin",
     );
@@ -458,13 +420,10 @@ describe("router service", () => {
       "from-runtime",
     );
     await expect(readFile(path.join(defaultCodexHome, "config.toml"), "utf8")).resolves.toContain(
-      'model = "gpt-5.7"',
+      'model = "gpt-5.6"',
     );
     await expect(readFile(path.join(defaultCodexHome, "history.jsonl"), "utf8")).resolves.toContain(
-      "from-runtime",
-    );
-    await expect(readFile(path.join(defaultCodexHome, "packages", "runtime.txt"), "utf8")).resolves.toContain(
-      "runtime",
+      "from-source",
     );
   });
 });

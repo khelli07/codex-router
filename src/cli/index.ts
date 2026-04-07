@@ -256,6 +256,10 @@ export async function runCli(
     dependencies.writeStdout(`Installed codex wrapper at ${result.wrapperPath}\n`);
     dependencies.writeStdout(`Real codex binary: ${result.realCodexPath}\n`);
     dependencies.writeStdout(`Activate in this shell: ${result.pathHint} && hash -r\n`);
+    if (result.bootstrapMessage) {
+      const prefix = result.bootstrapStatus === "failed" ? "Warning" : "Bootstrap";
+      dependencies.writeStdout(`${prefix}: ${result.bootstrapMessage}\n`);
+    }
     const shellProfile = await dependencies.updateShellProfile(path.dirname(result.wrapperPath));
 
     if (shellProfile.profilePath) {

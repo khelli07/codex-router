@@ -11,6 +11,8 @@ function makeDependencies(overrides: Partial<CliDependencies> = {}): TestCliDepe
     wrapperPath: "/tmp/codex-router/bin/codex",
     realCodexPath: "/usr/local/bin/codex",
     pathHint: "export PATH='/tmp/codex-router/bin':$PATH",
+    bootstrapStatus: "imported",
+    bootstrapMessage: "Imported shared non-auth state from /tmp/.codex.",
   };
   const launcher: WrapperLauncher = {
     kind: "command",
@@ -148,6 +150,7 @@ describe("CLI", () => {
     expect(output).toContain("Installed codex wrapper");
     expect(output).toContain("Real codex binary");
     expect(output).toContain("Activate in this shell");
+    expect(output).toContain("Bootstrap: Imported shared non-auth state");
     expect(output).toMatch(/(Updated|Verified) shell profile|Add to your shell profile/);
   });
 });

@@ -34,16 +34,6 @@ interface ImportSharedStateInput {
   routerHome: string;
 }
 
-interface RestoreCodexHomeInput {
-  sourceCodexHome: string;
-  targetCodexHome: string;
-}
-
-interface PersistRuntimeStateInput {
-  routerHome: string;
-  targetCodexHome: string;
-}
-
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
     await stat(targetPath);
@@ -56,6 +46,11 @@ async function pathExists(targetPath: string): Promise<boolean> {
 
     throw error;
   }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const asNodeError = error as NodeJS.ErrnoException;
+  return asNodeError.code === "ENOENT";
 }
 
 async function resolveExistingPath(targetPath: string): Promise<string | undefined> {
@@ -116,61 +111,83 @@ async function ensurePrivateDirectory(targetPath: string): Promise<void> {
 }
 
 async function copyIntoManagedState(source: string, target: string): Promise<void> {
-  const sourceStat = await lstat(source);
+  try {
+    const sourceStat = await lstat(source);
 
-  let actualSource = source;
-  let actualStat = sourceStat;
-  if (sourceStat.isSymbolicLink()) {
-    actualSource = await realpath(source);
-    actualStat = await stat(source);
-  }
-
-  const resolvedTarget = await resolveExistingPath(target);
-  if (resolvedTarget && resolvedTarget === actualSource) {
-    return;
-  }
-
-  await rm(target, { force: true, recursive: true });
-  await cp(actualSource, target, {
-    recursive: actualStat.isDirectory(),
-    dereference: true,
-  });
-}
-
-async function writeSanitizedConfig(sourcePath: string, targetPath: string): Promise<void> {
-  const sanitized = sanitizeConfigContents(await readFile(sourcePath, "utf8"));
-  await writeFile(targetPath, sanitized ? `${sanitized}\n` : "", "utf8");
-  await chmod(targetPath, 0o600);
-}
-
-async function syncShareableEntries(sourceHome: string, targetHome: string): Promise<void> {
-  await ensurePrivateDirectory(targetHome);
-
-  const [sourceNames, targetNames] = await Promise.all([
-    listShareableEntryNames(sourceHome),
-    listShareableEntryNames(targetHome),
-  ]);
-  const sourceNameSet = new Set(sourceNames);
-
-  for (const targetName of targetNames) {
-    if (sourceNameSet.has(targetName)) {
-      continue;
+    let actualSource = source;
+    let actualStat = sourceStat;
+    if (sourceStat.isSymbolicLink()) {
+      actualSource = await realpath(source);
+      actualStat = await stat(source);
     }
 
-    await rm(path.join(targetHome, targetName), { force: true, recursive: true });
-  }
+    const resolvedTarget = await resolveExistingPath(target);
+    if (resolvedTarget && resolvedTarget === actualSource) {
+      return;
+    }
 
-  for (const sourceName of sourceNames) {
+    await rm(target, { force: true, recursive: true });
+    await cp(actualSource, target, {
+      recursive: actualStat.isDirectory(),
+      dereference: true,
+    });
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+function normalizeSharedConfigContents(contents: string): string {
+  const sanitized = contents
+    .split("\n")
+    .filter((line) => !line.startsWith("# Managed by codex-router for "))
+    .filter((line) => !line.trimStart().startsWith('cli_auth_credentials_store = '))
+    .join("\n")
+    .trimEnd();
+
+  return [sanitized, 'cli_auth_credentials_store = "file"'].filter(Boolean).join("\n");
+}
+
+async function writeNormalizedSharedConfig(sourcePath: string, targetPath: string): Promise<void> {
+  try {
+    const normalized = normalizeSharedConfigContents(await readFile(sourcePath, "utf8"));
+    await writeFile(targetPath, `${normalized}\n`, "utf8");
+    await chmod(targetPath, 0o600);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+async function ensureSharedConfig(sharedDir: string): Promise<void> {
+  const configPath = path.join(sharedDir, "config.toml");
+  const currentContents = (await pathExists(configPath)) ? await readFile(configPath, "utf8") : "";
+  await writeFile(configPath, `${normalizeSharedConfigContents(currentContents)}\n`, "utf8");
+  await chmod(configPath, 0o600);
+}
+
+async function copyShareableEntries(sourceHome: string, targetHome: string): Promise<void> {
+  await ensurePrivateDirectory(targetHome);
+
+  for (const sourceName of await listShareableEntryNames(sourceHome)) {
     const sourcePath = path.join(sourceHome, sourceName);
     const targetPath = path.join(targetHome, sourceName);
 
     if (sourceName === "config.toml") {
-      await writeSanitizedConfig(sourcePath, targetPath);
+      await writeNormalizedSharedConfig(sourcePath, targetPath);
       continue;
     }
 
     await copyIntoManagedState(sourcePath, targetPath);
   }
+
+  await ensureSharedConfig(targetHome);
 }
 
 async function assertImportSourceAllowed(sourceCodexHome: string, layout: RouterLayout): Promise<void> {
@@ -207,48 +224,62 @@ async function listShareableEntryNames(homeDir: string): Promise<string[]> {
     .sort();
 }
 
-function sanitizeConfigContents(contents: string): string {
-  return contents
-    .split("\n")
-    .filter((line) => !line.startsWith("# Managed by codex-router for "))
-    .filter((line) => !line.trimStart().startsWith('cli_auth_credentials_store = '))
-    .join("\n")
-    .trimEnd();
+async function entryMirrorsSharedSource(runtimePath: string, sharedPath: string): Promise<boolean> {
+  try {
+    const runtimeStat = await lstat(runtimePath);
+    if (!runtimeStat.isSymbolicLink()) {
+      return false;
+    }
+
+    const [resolvedRuntime, resolvedShared] = await Promise.all([
+      resolveExistingPath(runtimePath),
+      resolveExistingPath(sharedPath),
+    ]);
+    return Boolean(resolvedRuntime && resolvedShared && resolvedRuntime === resolvedShared);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return false;
+    }
+
+    throw error;
+  }
 }
 
-async function syncRuntimeStateToShared(layout: RouterLayout): Promise<void> {
+export async function isSharedStateEmpty(routerHome: string): Promise<boolean> {
+  const layout = await ensureRouterLayout(routerHome);
+  return (await listShareableEntryNames(layout.sharedDir)).length === 0;
+}
+
+export async function persistRuntimeStateToShared(routerHome: string): Promise<void> {
+  const layout = await ensureRouterLayout(routerHome);
   if (!(await pathExists(layout.runtimeCurrentHomeDir))) {
     return;
   }
 
   if ((await readdir(layout.runtimeCurrentHomeDir)).length === 0) {
+    await ensureSharedConfig(layout.sharedDir);
     return;
   }
 
-  await syncShareableEntries(layout.runtimeCurrentHomeDir, layout.sharedDir);
-}
+  for (const name of await listShareableEntryNames(layout.runtimeCurrentHomeDir)) {
+    const runtimePath = path.join(layout.runtimeCurrentHomeDir, name);
+    const sharedPath = path.join(layout.sharedDir, name);
 
-async function writeRuntimeConfig(sharedDir: string, runtimeHomeDir: string, tag: string): Promise<string> {
-  const sharedConfigPath = path.join(sharedDir, "config.toml");
-  const runtimeConfigPath = path.join(runtimeHomeDir, "config.toml");
+    if (await entryMirrorsSharedSource(runtimePath, sharedPath)) {
+      continue;
+    }
 
-  const sharedConfig = (await pathExists(sharedConfigPath))
-    ? await readFile(sharedConfigPath, "utf8")
-    : "";
-  const sanitizedSharedConfig = sanitizeConfigContents(sharedConfig);
+    if (name === "config.toml") {
+      await writeNormalizedSharedConfig(runtimePath, sharedPath);
+      await relinkRuntimeEntryToShared(layout.sharedDir, layout.runtimeCurrentHomeDir, name);
+      continue;
+    }
 
-  const managedConfig = [
-    sanitizedSharedConfig.trimEnd(),
-    "",
-    `# Managed by codex-router for ${tag}`,
-    'cli_auth_credentials_store = "file"',
-  ]
-    .filter(Boolean)
-    .join("\n");
+    await copyIntoManagedState(runtimePath, sharedPath);
+    await relinkRuntimeEntryToShared(layout.sharedDir, layout.runtimeCurrentHomeDir, name);
+  }
 
-  await writeFile(runtimeConfigPath, `${managedConfig}\n`, "utf8");
-  await chmod(runtimeConfigPath, 0o600);
-  return runtimeConfigPath;
+  await ensureSharedConfig(layout.sharedDir);
 }
 
 async function linkSharedEntry(sharedDir: string, runtimeHomeDir: string, name: string): Promise<void> {
@@ -260,6 +291,21 @@ async function linkSharedEntry(sharedDir: string, runtimeHomeDir: string, name: 
 
   const target = path.join(runtimeHomeDir, name);
   await symlink(source, target);
+}
+
+async function relinkRuntimeEntryToShared(
+  sharedDir: string,
+  runtimeHomeDir: string,
+  name: string,
+): Promise<void> {
+  const sharedPath = path.join(sharedDir, name);
+  if (!(await pathExists(sharedPath))) {
+    return;
+  }
+
+  const runtimePath = path.join(runtimeHomeDir, name);
+  await rm(runtimePath, { force: true, recursive: true });
+  await symlink(sharedPath, runtimePath);
 }
 
 export async function ensureRouterLayout(routerHome: string): Promise<RouterLayout> {
@@ -278,7 +324,7 @@ export async function seedSharedStateFromCodexHome(
     return layout;
   }
 
-  await syncShareableEntries(input.sourceCodexHome, layout.sharedDir);
+  await copyShareableEntries(input.sourceCodexHome, layout.sharedDir);
   return layout;
 }
 
@@ -286,17 +332,14 @@ export async function assembleRuntimeHome(
   input: AssembleRuntimeHomeInput,
 ): Promise<RuntimeHomeResult> {
   const layout = await ensureRouterLayout(input.routerHome);
-  await syncRuntimeStateToShared(layout);
+  await persistRuntimeStateToShared(input.routerHome);
+  await ensureSharedConfig(layout.sharedDir);
 
   const stagingDir = `${layout.runtimeCurrentHomeDir}.${process.pid}.${Date.now()}`;
   await ensurePrivateDirectory(stagingDir);
 
   try {
     for (const entry of await listShareableEntryNames(layout.sharedDir)) {
-      if (entry === "config.toml") {
-        continue;
-      }
-
       await linkSharedEntry(layout.sharedDir, stagingDir, entry);
     }
 
@@ -304,14 +347,12 @@ export async function assembleRuntimeHome(
     await cp(input.authSourcePath, authPath);
     await chmod(authPath, 0o600);
 
-    const configPath = await writeRuntimeConfig(layout.sharedDir, stagingDir, input.tag);
-
     await rm(layout.runtimeCurrentHomeDir, { force: true, recursive: true });
     await rename(stagingDir, layout.runtimeCurrentHomeDir);
 
     return {
       runtimeHomeDir: layout.runtimeCurrentHomeDir,
-      configPath: path.join(layout.runtimeCurrentHomeDir, path.basename(configPath)),
+      configPath: path.join(layout.runtimeCurrentHomeDir, "config.toml"),
       authPath: path.join(layout.runtimeCurrentHomeDir, "auth.json"),
     };
   } catch (error) {
@@ -323,17 +364,7 @@ export async function assembleRuntimeHome(
 export async function importSharedState(input: ImportSharedStateInput): Promise<RouterLayout> {
   const layout = await ensureRouterLayout(input.routerHome);
   await assertImportSourceAllowed(input.sourceCodexHome, layout);
-  await syncShareableEntries(input.sourceCodexHome, layout.sharedDir);
+  await copyShareableEntries(input.sourceCodexHome, layout.sharedDir);
 
   return layout;
-}
-
-export async function restoreCodexHomeFromSource(input: RestoreCodexHomeInput): Promise<void> {
-  await syncShareableEntries(input.sourceCodexHome, input.targetCodexHome);
-}
-
-export async function persistRuntimeStateToCodexHome(input: PersistRuntimeStateInput): Promise<void> {
-  const layout = await ensureRouterLayout(input.routerHome);
-  await syncRuntimeStateToShared(layout);
-  await syncShareableEntries(layout.sharedDir, input.targetCodexHome);
 }

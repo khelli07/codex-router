@@ -1,4 +1,4 @@
-import { chmod, readFile, rm } from "node:fs/promises";
+import { chmod, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -26,8 +26,9 @@ import { getRouterLayout } from "./paths.js";
 import {
   assembleRuntimeHome,
   ensureRouterLayout,
-  persistRuntimeStateToCodexHome,
-  seedSharedStateFromCodexHome,
+  importSharedState,
+  isSharedStateEmpty,
+  persistRuntimeStateToShared,
 } from "./runtime-home.js";
 import type { RateLimitSnapshot } from "./status.js";
 import type { AccountAuthState } from "./accounts.js";
@@ -127,30 +128,22 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
   const layout = getRouterLayout(input.routerHome);
   const defaultCodexHome = path.join(os.homedir(), ".codex");
 
-  async function getActiveTag(): Promise<string | undefined> {
-    const active = await getActiveAccount(layout.registryPath);
-    return active?.tag;
-  }
-
-  async function seedSharedStateIfNeeded(): Promise<void> {
+  async function directoryExists(targetPath: string): Promise<boolean> {
     try {
-      await seedSharedStateFromCodexHome({
-        sourceCodexHome: defaultCodexHome,
-        routerHome: input.routerHome,
-      });
+      return (await stat(targetPath)).isDirectory();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes("Cannot import from the router-managed runtime home")) {
-        throw error;
+      const asNodeError = error as NodeJS.ErrnoException;
+      if (asNodeError.code === "ENOENT") {
+        return false;
       }
+
+      throw error;
     }
   }
 
-  async function syncSharedStateBackToDefaultCodexHome(): Promise<void> {
-    await persistRuntimeStateToCodexHome({
-      routerHome: input.routerHome,
-      targetCodexHome: defaultCodexHome,
-    });
+  async function getActiveTag(): Promise<string | undefined> {
+    const active = await getActiveAccount(layout.registryPath);
+    return active?.tag;
   }
 
   async function getCodexCommand(): Promise<string> {
@@ -164,7 +157,6 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
   return {
     async login(tag: string): Promise<AccountRecord> {
       await ensureRouterLayout(input.routerHome);
-      await seedSharedStateIfNeeded();
       const codexCommand = await getCodexCommand();
 
       const accountHomeDir = getAccountHomeDir(layout.accountsDir, tag);
@@ -208,7 +200,42 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
     async initWrapper(launcher: WrapperLauncher): Promise<WrapperInstallResult> {
       await ensureRouterLayout(input.routerHome);
       const realCodexPath = await findRealCodexPath(input.routerHome, input.pathValue);
-      return await installCodexWrapper(input.routerHome, realCodexPath, launcher);
+      const installed = await installCodexWrapper(input.routerHome, realCodexPath, launcher);
+
+      if (!(await isSharedStateEmpty(input.routerHome))) {
+        return {
+          ...installed,
+          bootstrapStatus: "skipped",
+          bootstrapMessage: "Shared state already initialized; bootstrap import skipped.",
+        };
+      }
+
+      if (!(await directoryExists(defaultCodexHome))) {
+        return {
+          ...installed,
+          bootstrapStatus: "skipped",
+          bootstrapMessage: `No existing Codex home found at ${defaultCodexHome}; starting with router-managed shared state.`,
+        };
+      }
+
+      try {
+        await importSharedState({
+          sourceCodexHome: defaultCodexHome,
+          routerHome: input.routerHome,
+        });
+        return {
+          ...installed,
+          bootstrapStatus: "imported",
+          bootstrapMessage: `Imported shared non-auth state from ${defaultCodexHome}.`,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          ...installed,
+          bootstrapStatus: "failed",
+          bootstrapMessage: `Wrapper installed, but shared-state bootstrap import failed: ${message}`,
+        };
+      }
     },
 
     async runSelectedCodex(args: string[]): Promise<number> {
@@ -225,7 +252,6 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
         return result.exitCode;
       }
 
-      await seedSharedStateIfNeeded();
       await assembleRuntimeHome({
         routerHome: input.routerHome,
         tag: active.tag,
@@ -242,7 +268,7 @@ export function createRouterService(input: CreateRouterServiceInput): RouterServ
         });
         return result.exitCode;
       } finally {
-        await syncSharedStateBackToDefaultCodexHome();
+        await persistRuntimeStateToShared(input.routerHome);
       }
     },
 

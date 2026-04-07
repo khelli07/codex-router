@@ -12,6 +12,8 @@ export interface WrapperInstallResult {
   wrapperPath: string;
   realCodexPath: string;
   pathHint: string;
+  bootstrapStatus?: "imported" | "skipped" | "failed";
+  bootstrapMessage?: string;
 }
 
 export type WrapperLauncher =
