@@ -117,19 +117,19 @@ function colorEnabled(): boolean {
 }
 
 interface ThemeColor {
-  fg: [number, number, number];
+  fg256: number;
   bold?: boolean;
 }
 
 const THEME = {
-  header: { fg: [116, 138, 168], bold: true },
-  active: { fg: [94, 234, 212], bold: true },
-  healthy: { fg: [110, 231, 183], bold: true },
-  warning: { fg: [251, 191, 36], bold: true },
-  danger: { fg: [248, 113, 113], bold: true },
-  muted: { fg: [148, 163, 184] },
-  text: { fg: [226, 232, 240] },
-  authReady: { fg: [125, 211, 252], bold: true },
+  header: { fg256: 153, bold: true },
+  active: { fg256: 117, bold: true },
+  healthy: { fg256: 159, bold: true },
+  warning: { fg256: 222, bold: true },
+  danger: { fg256: 217, bold: true },
+  muted: { fg256: 146 },
+  text: { fg256: 255 },
+  authReady: { fg256: 123, bold: true },
 } satisfies Record<string, ThemeColor>;
 
 function colorize(text: string, color: ThemeColor): string {
@@ -137,9 +137,8 @@ function colorize(text: string, color: ThemeColor): string {
     return text;
   }
 
-  const [red, green, blue] = color.fg;
   const prefix = color.bold ? "\u001b[1m" : "";
-  return `${prefix}\u001b[38;2;${red};${green};${blue}m${text}\u001b[0m`;
+  return `${prefix}\u001b[38;5;${color.fg256}m${text}\u001b[0m`;
 }
 
 function tintPercent(text: string, used?: number): string {
