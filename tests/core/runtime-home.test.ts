@@ -123,6 +123,32 @@ describe("runtime home assembly", () => {
     await expect(readFile(path.join(layout.sharedDir, "auth.json"), "utf8")).rejects.toThrow();
   });
 
+  test("keeps injected auth config at the TOML top level", async () => {
+    const routerHome = await makeRouterHome();
+    const sourceHome = path.join(routerHome, "source-codex-home");
+    const layout = await ensureRouterLayout(routerHome);
+
+    await mkdir(sourceHome, { recursive: true });
+    await writeFile(
+      path.join(sourceHome, "config.toml"),
+      'model = "gpt-5.5"\n\n[tui.model_availability_nux]\n"gpt-5.5" = 1\n',
+      "utf8",
+    );
+
+    await importSharedState({
+      sourceCodexHome: sourceHome,
+      routerHome,
+    });
+
+    const configLines = (await readFile(path.join(layout.sharedDir, "config.toml"), "utf8")).split("\n");
+    const authConfigIndex = configLines.indexOf('cli_auth_credentials_store = "file"');
+    const tuiTableIndex = configLines.indexOf("[tui.model_availability_nux]");
+
+    expect(authConfigIndex).toBeGreaterThanOrEqual(0);
+    expect(tuiTableIndex).toBeGreaterThanOrEqual(0);
+    expect(authConfigIndex).toBeLessThan(tuiTableIndex);
+  });
+
   test("dereferences imported symlinks instead of copying them as managed symlinks", async () => {
     const routerHome = await makeRouterHome();
     const sourceHome = path.join(routerHome, "source-codex-home");
@@ -198,6 +224,68 @@ describe("runtime home assembly", () => {
 
     const packagesTarget = await realpath(path.join(layout.runtimeCurrentHomeDir, "packages"));
     expect(packagesTarget).toBe(await realpath(path.join(layout.sharedDir, "packages")));
+  });
+
+  test("reuses the existing runtime home when the selected tag has not changed", async () => {
+    const routerHome = await makeRouterHome();
+    const layout = await ensureRouterLayout(routerHome);
+
+    await writeFile(path.join(layout.sharedDir, "config.toml"), 'model = "gpt-5.4"\n', "utf8");
+
+    const authPath = path.join(layout.accountsDir, "codex-1", "auth.json");
+    await mkdir(path.dirname(authPath), { recursive: true });
+    await writeFile(authPath, "{\"access_token\":\"secret-1\"}\n", "utf8");
+
+    await assembleRuntimeHome({
+      routerHome,
+      tag: "codex-1",
+      authSourcePath: authPath,
+    });
+
+    const firstAuthStat = await stat(path.join(layout.runtimeCurrentHomeDir, "auth.json"));
+
+    await assembleRuntimeHome({
+      routerHome,
+      tag: "codex-1",
+      authSourcePath: authPath,
+    });
+
+    const secondAuthStat = await stat(path.join(layout.runtimeCurrentHomeDir, "auth.json"));
+    expect(secondAuthStat.ino).toBe(firstAuthStat.ino);
+    await expect(readFile(path.join(layout.runtimeCurrentHomeDir, "auth.json"), "utf8")).resolves.toContain("secret-1");
+  });
+
+  test("rebuilds the runtime home when the selected tag changes", async () => {
+    const routerHome = await makeRouterHome();
+    const layout = await ensureRouterLayout(routerHome);
+
+    await writeFile(path.join(layout.sharedDir, "config.toml"), 'model = "gpt-5.4"\n', "utf8");
+
+    const authPathOne = path.join(layout.accountsDir, "codex-1", "auth.json");
+    await mkdir(path.dirname(authPathOne), { recursive: true });
+    await writeFile(authPathOne, "{\"access_token\":\"secret-1\"}\n", "utf8");
+
+    const authPathTwo = path.join(layout.accountsDir, "codex-2", "auth.json");
+    await mkdir(path.dirname(authPathTwo), { recursive: true });
+    await writeFile(authPathTwo, "{\"access_token\":\"secret-2\"}\n", "utf8");
+
+    await assembleRuntimeHome({
+      routerHome,
+      tag: "codex-1",
+      authSourcePath: authPathOne,
+    });
+
+    const firstAuthStat = await stat(path.join(layout.runtimeCurrentHomeDir, "auth.json"));
+
+    await assembleRuntimeHome({
+      routerHome,
+      tag: "codex-2",
+      authSourcePath: authPathTwo,
+    });
+
+    const secondAuthStat = await stat(path.join(layout.runtimeCurrentHomeDir, "auth.json"));
+    expect(secondAuthStat.ino).not.toBe(firstAuthStat.ino);
+    await expect(readFile(path.join(layout.runtimeCurrentHomeDir, "auth.json"), "utf8")).resolves.toContain("secret-2");
   });
 
   test("does not delete shared entries when runtime symlinks are removed", async () => {

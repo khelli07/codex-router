@@ -17,6 +17,7 @@ import path from "node:path";
 import { getRouterLayout, type RouterLayout } from "./paths.js";
 
 const EXCLUDED_SHARED_ENTRY_NAMES = new Set(["auth.json"]);
+const FILE_AUTH_CONFIG_LINE = 'cli_auth_credentials_store = "file"';
 export interface RuntimeHomeResult {
   runtimeHomeDir: string;
   configPath: string;
@@ -32,6 +33,10 @@ interface AssembleRuntimeHomeInput {
 interface ImportSharedStateInput {
   sourceCodexHome: string;
   routerHome: string;
+}
+
+interface RuntimeHomeState {
+  tag: string;
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -141,14 +146,20 @@ async function copyIntoManagedState(source: string, target: string): Promise<voi
 }
 
 function normalizeSharedConfigContents(contents: string): string {
-  const sanitized = contents
+  const sanitizedLines = contents
     .split("\n")
     .filter((line) => !line.startsWith("# Managed by codex-router for "))
     .filter((line) => !line.trimStart().startsWith('cli_auth_credentials_store = '))
-    .join("\n")
-    .trimEnd();
+  const firstTableIndex = sanitizedLines.findIndex((line) => line.trimStart().startsWith("["));
 
-  return [sanitized, 'cli_auth_credentials_store = "file"'].filter(Boolean).join("\n");
+  if (firstTableIndex === -1) {
+    const sanitized = sanitizedLines.join("\n").trimEnd();
+    return [sanitized, FILE_AUTH_CONFIG_LINE].filter(Boolean).join("\n");
+  }
+
+  const topLevelContents = sanitizedLines.slice(0, firstTableIndex).join("\n").trimEnd();
+  const tableContents = sanitizedLines.slice(firstTableIndex).join("\n").trimEnd();
+  return [topLevelContents, FILE_AUTH_CONFIG_LINE, tableContents].filter(Boolean).join("\n");
 }
 
 async function writeNormalizedSharedConfig(sourcePath: string, targetPath: string): Promise<void> {
@@ -308,6 +319,45 @@ async function relinkRuntimeEntryToShared(
   await symlink(sharedPath, runtimePath);
 }
 
+function getRuntimeStatePath(layout: RouterLayout): string {
+  return path.join(layout.stateDir, "runtime-home.json");
+}
+
+async function readRuntimeState(layout: RouterLayout): Promise<RuntimeHomeState | undefined> {
+  try {
+    return JSON.parse(await readFile(getRuntimeStatePath(layout), "utf8")) as RuntimeHomeState;
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return undefined;
+    }
+
+    throw error;
+  }
+}
+
+async function writeRuntimeState(layout: RouterLayout, state: RuntimeHomeState): Promise<void> {
+  const statePath = getRuntimeStatePath(layout);
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await chmod(statePath, 0o600);
+}
+
+async function canReuseRuntimeHome(layout: RouterLayout, tag: string): Promise<boolean> {
+  if (!(await pathExists(layout.runtimeCurrentHomeDir))) {
+    return false;
+  }
+
+  if (!(await pathExists(path.join(layout.runtimeCurrentHomeDir, "auth.json")))) {
+    return false;
+  }
+
+  if (!(await pathExists(path.join(layout.runtimeCurrentHomeDir, "config.toml")))) {
+    return false;
+  }
+
+  const state = await readRuntimeState(layout);
+  return state?.tag === tag;
+}
+
 export async function ensureRouterLayout(routerHome: string): Promise<RouterLayout> {
   const layout = getRouterLayout(routerHome);
   await ensureSharedContainers(layout);
@@ -332,6 +382,17 @@ export async function assembleRuntimeHome(
   input: AssembleRuntimeHomeInput,
 ): Promise<RuntimeHomeResult> {
   const layout = await ensureRouterLayout(input.routerHome);
+
+  if (await canReuseRuntimeHome(layout, input.tag)) {
+    await persistRuntimeStateToShared(input.routerHome);
+    await ensureSharedConfig(layout.sharedDir);
+    return {
+      runtimeHomeDir: layout.runtimeCurrentHomeDir,
+      configPath: path.join(layout.runtimeCurrentHomeDir, "config.toml"),
+      authPath: path.join(layout.runtimeCurrentHomeDir, "auth.json"),
+    };
+  }
+
   await persistRuntimeStateToShared(input.routerHome);
   await ensureSharedConfig(layout.sharedDir);
 
@@ -349,6 +410,7 @@ export async function assembleRuntimeHome(
 
     await rm(layout.runtimeCurrentHomeDir, { force: true, recursive: true });
     await rename(stagingDir, layout.runtimeCurrentHomeDir);
+    await writeRuntimeState(layout, { tag: input.tag });
 
     return {
       runtimeHomeDir: layout.runtimeCurrentHomeDir,
